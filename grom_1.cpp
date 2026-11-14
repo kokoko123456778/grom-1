@@ -85,7 +85,8 @@ static inline uint32_t mixC(uint32_t a, uint32_t b, float t) {
 static inline uint32_t withA(uint32_t c, int a) { return (c & 0xFFFFFFu) | ((uint32_t)clampi(a, 0, 255) << 24); }
 
 // ------------------------------------------------------------ разрешения
-static const int UIW = 640, UIH = 360;
+static const int UIH = 360, UIW_MAX = 1000;
+static int UIW = 640;   // ширина холста интерфейса: 640 для 16:9, шире — для вытянутых экранов телефонов
 static int RW = 320, RH = 180;
 
 // =====================================================================
@@ -225,7 +226,7 @@ static int utf8Len(const char* s) { int n = 0; while (utf8Next(s)) n++; return n
 // =====================================================================
 //  UI-слой 640x360 с альфой
 // =====================================================================
-static uint32_t g_ui[UIW * UIH];
+static uint32_t g_ui[UIW_MAX * UIH];
 static inline void uiBlend(uint32_t& d, uint32_t s) {
     uint32_t sa = s >> 24;
     if (sa == 0) return;
@@ -238,11 +239,14 @@ static inline void uiBlend(uint32_t& d, uint32_t s) {
     uint32_t b = ((s & 255) * ws + (d & 255) * wd) / tot;
     d = (oa << 24) | (r << 16) | (g << 8) | b;
 }
+static int g_uiOX = 0;   // сдвиг экранов, свёрстанных под 640, к центру широкого экрана
 static inline void uiPix(int x, int y, uint32_t c) {
+    x += g_uiOX;
     if ((unsigned)x >= (unsigned)UIW || (unsigned)y >= (unsigned)UIH) return;
     uiBlend(g_ui[y * UIW + x], c);
 }
 static void uiRect(int x, int y, int w, int h, uint32_t c) {
+    x += g_uiOX;
     int x0 = std::max(0, x), y0 = std::max(0, y), x1 = std::min(UIW, x + w), y1 = std::min(UIH, y + h);
     for (int j = y0; j < y1; j++) { uint32_t* row = g_ui + j * UIW; for (int i = x0; i < x1; i++) uiBlend(row[i], c); }
 }
@@ -655,7 +659,7 @@ static void rendResize(int w, int h) {
 static void setCam(V3 pos, float yaw, float pitch, float roll, float fovH, float farZ) {
     Basis b = basisYPR(yaw, pitch, roll);
     g_cam.pos = pos; g_cam.R = b.r; g_cam.U = b.u; g_cam.F = b.f;
-    g_cam.focal = (RW * 0.5f) / tanf(fovH * 0.5f);
+    g_cam.focal = (RH * (16.0f / 9.0f) * 0.5f) / tanf(fovH * 0.5f);
     g_cam.cx = RW * 0.5f; g_cam.cy = RH * 0.5f;
     g_cam.nearZ = 0.05f; g_cam.farZ = farZ;
     g_cam.th = (RW * 0.5f) / g_cam.focal; g_cam.tv = (RH * 0.5f) / g_cam.focal;
@@ -802,7 +806,7 @@ static void drawQuadW(V3 a, V3 b, V3 c, V3 d, uint32_t col, int mode) {
 }
 
 // ------------------------------------------------------------ процедурные текстуры
-enum TexId { TX_NONE, TX_PLASTER, TX_BRICK, TX_CONCRETE, TX_WOOD, TX_METAL, TX_ROOF, TX_ROCK, TX_GROUND, TX_SANDBAG, TX_ASPHALT };
+enum TexId { TX_NONE, TX_PLASTER, TX_BRICK, TX_CONCRETE, TX_WOOD, TX_METAL, TX_ROOF, TX_ROCK, TX_GROUND, TX_SANDBAG, TX_ASPHALT, TX_ROAD, TX_PAVING, TX_TILES, TX_DIRT };
 static uint8_t g_noise[256 * 256];
 static uint8_t g_fine[256 * 256];
 static uint8_t g_noise2[256 * 256];   // шум с решёткой 64x64 — детали облаков
@@ -853,7 +857,10 @@ static inline int texMul(int tex, float u, float v, float dist) {
     case TX_ROCK: m = 226 + ((NZ(iu >> 2, iv >> 2) - 128) >> 1) + ((NZ(iu, iv) - 128) >> 3); break;
     case TX_GROUND: m = 238 + ((NZ(iu >> 3, iv >> 3) - 128) >> 2) + ((NZ(iu, iv) - 128) >> 3) + ((FN(iu, iv) & 15) - 8); break;
     case TX_SANDBAG: { int row = iv / 4, cu = iu + (row & 1) * 3; int ly = iv % 4, lx = cu % 7; m = (ly == 0 || lx == 0) ? 180 : 238 - abs(ly - 2) * 6 - abs(lx - 3) * 4; } break;
-    case TX_ASPHALT: m = 240 + ((NZ(iu >> 2, iv >> 2) - 128) >> 3) + ((FN(iu, iv) & 15) - 8); break;
+    case TX_ASPHALT: case TX_ROAD: m = 240 + ((NZ(iu >> 2, iv >> 2) - 128) >> 3) + ((FN(iu, iv) & 15) - 8) - ((hash2(iu / 27, iv / 69) & 15) == 0 ? 26 : 0); break;
+    case TX_PAVING: { int row = iv / 4, cu = iu + (row & 1) * 2; m = ((iv & 3) == 0 || (cu % 3) == 0) ? 178 : 226 + ((int)(hash2(cu / 3, row) & 31) - 16) + ((FN(iu, iv) & 7) - 4); } break;
+    case TX_TILES: m = ((iu & 7) == 0 || (iv & 7) == 0) ? 200 : 244 + ((int)(hash2(iu >> 3, iv >> 3) & 15) - 8); break;
+    case TX_DIRT: m = 236 + ((NZ(iu >> 2, iv >> 2) - 128) >> 2) + ((FN(iu, iv) & 15) - 8); break;
     default: break;
     }
     float f = dist < 18.0f ? 1.0f : (dist > 45.0f ? 0.0f : (45.0f - dist) / 27.0f);
@@ -1238,11 +1245,12 @@ struct Smoke { V3 p; float r, life, emit; };
 struct Tracer { V3 a, b; float t; uint32_t col; };
 struct HitInd { float yaw, t; };
 struct Sub { std::string who, text; float t, dur; uint32_t col; bool radio; };
-struct Settings { float lookSens = 1.0f, padSens = 1.0f; bool invertY = false; int volume = 8; bool vibration = true; int quality = 1; int difficulty = 1; bool showFps = false; int renderer = 0; };
+struct Settings { float lookSens = 1.0f, padSens = 1.0f; bool invertY = false; int volume = 8; bool vibration = true; int quality = 1; int difficulty = 1; bool showFps = false; int renderer = 0; bool aimAssist = true; };
 struct Progress { int unlocked = 1; float bestKH = 0; int cpMission = -1, cpStage = 0; bool done = false; };
 
 enum Screen { SCR_MENU, SCR_SELECT, SCR_SETTINGS, SCR_BRIEF, SCR_PLAY, SCR_PAUSE, SCR_DEAD, SCR_DEBRIEF, SCR_EPILOGUE, SCR_CUTSCENE, SCR_DEFUSE };
 
+static int g_lastDev = 2; // последнее устройство ввода: 0 тач, 1 геймпад, 2 клавиатура/мышь
 struct MTri { V3 a, b, c; uint32_t col; };                 // статичный треугольник окружения (горы, воронки)
 struct MGroup { V3 c; float r; int t0, t1; };               // группа треугольников для отсечения
 struct Prop { V3 c; Basis B; V3 h; uint32_t col; };         // повёрнутый брус (ежи, проволока, обломки)
@@ -2861,6 +2869,7 @@ static void playerUpdate(float dt) {
     }
     // ---- гранаты
     if (IN.tacCycle) { P.tac = P.tac == 1 ? 2 : 1; playSnd(ST_CLICK, 0.25f, 0, 0, 0.05f, 1); }
+    if (P.nade[P.tac] <= 0 && P.nade[3 - P.tac] > 0 && P.cookType < 0) P.tac = 3 - P.tac;
     bool canThrow = P.switchT <= 0 && !dragging && P.throwAnim <= 0 && !P.sprint;
     if (P.cookType < 0 && canThrow) {
         if (IN.nadeHeld && P.nade[0] > 0) { P.cookType = 0; P.cookT = 0; CW.reloadT = 0; playSnd(ST_CLICK, 0.4f, 0, 0, 0.1f, 0.06f); }
@@ -5598,7 +5607,7 @@ static void drawViewModel(float dt) {
     float oldNear = g_cam.nearZ; g_cam.nearZ = 0.02f;
     float vfov = 62 * DEG;
     float savedFocal = g_cam.focal;
-    g_cam.focal = (RW * 0.5f) / tanf(vfov * 0.5f * lerpf(1.0f, 0.8f, P.adsT));
+    g_cam.focal = (RH * (16.0f / 9.0f) * 0.5f) / tanf(vfov * 0.5f * lerpf(1.0f, 0.8f, P.adsT));
     g_vmFocal = g_cam.focal;
     if (P.dead || scopeView() || P.tank) { g_cam.nearZ = oldNear; g_cam.focal = savedFocal; return; }
     g_inVM = g_useGL;
@@ -5846,6 +5855,31 @@ float texMul(float id, vec2 uv) {
     else if (id < 8.5) { m = 1.0 + (N(uv / 96.0) - 0.5) * 0.4 + (N(uv / 12.0) - 0.5) * 0.16 + (F(uv * 2.0) - 0.5) * 0.08; }
     else if (id < 9.5) { float row = floor(uv.y * 4.0); float x = uv.x / 0.44 + mod(row, 2.0) * 0.5; vec2 f = vec2(fract(x), fract(uv.y * 4.0)) - 0.5; m = 1.02 - dot(f, f) * 0.9; }
     else if (id < 10.5) { m = 1.0 + (N(uv / 24.0) - 0.5) * 0.1 + (F(uv * 3.0) - 0.5) * 0.1; }
+    else if (id < 11.95) {   // дорога: uv.x — поперёк от оси, uv.y — вдоль; полуширина в дробной части номера
+        float hw = (id - 11.0) * 20.0, ax = abs(uv.x);
+        m = 0.95 + (N(uv / 7.0) - 0.5) * 0.14 + (F(uv * 2.5) - 0.5) * 0.14;
+        if (H(floor(vec2((uv.x + 50.0) / 1.7, uv.y / 4.3))) > 0.88) m *= 0.86;                      // заплаты
+        float cr = abs(N(uv * 0.7 + 3.1) - 0.5);
+        m *= mix(0.62, 1.0, smoothstep(0.004, 0.02, cr));                                           // трещины
+        float lane = hw * 0.5, t1 = abs(ax - lane + 0.85), t2 = abs(ax - lane - 0.85), t = min(t1, t2);
+        m *= 1.0 - 0.09 * exp(-t * t * 6.0);                                                        // накатанная колея
+        m *= mix(1.0, 0.8, smoothstep(hw - 0.5, hw - 0.05, ax));                                    // грязь у бордюра
+    }
+    else if (id < 12.5) {   // брусчатка
+        float row = floor(uv.y / 0.24), x = uv.x / 0.2 + mod(row, 2.0) * 0.5;
+        vec2 f = vec2(fract(x), fract(uv.y / 0.24)) - 0.5;
+        float joint = smoothstep(0.37, 0.47, max(abs(f.x), abs(f.y)));
+        m = mix(0.93 + (H(vec2(floor(x), row)) - 0.5) * 0.3 - dot(f, f) * 0.3, 0.6, joint) + (N(uv / 9.0) - 0.5) * 0.12;
+    }
+    else if (id < 13.5) {   // плитка тротуара
+        vec2 g = fract(uv / 0.5);
+        float seam = max(step(g.x, 0.03), step(g.y, 0.03));
+        m = mix(1.02 + (H(floor(uv / 0.5)) - 0.5) * 0.12 + (F(uv) - 0.5) * 0.06, 0.78, seam);
+    }
+    else if (id < 14.95) {   // грунтовка: укатанные колеи
+        float ax = abs(uv.x), rut = exp(-(ax - 0.95) * (ax - 0.95) * 14.0);
+        m = 1.0 + (N(uv / 5.0) - 0.5) * 0.25 + (F(uv * 2.0) - 0.5) * 0.12 - rut * 0.18;
+    }
     float d = length(vW - uCam);
     return mix(1.0, m, clamp((90.0 - d) / 50.0, 0.0, 1.0));
 }
@@ -5883,9 +5917,30 @@ void main() {
             col = gc * col * tg.rgb * 1.25; a = 1.0;
         } else if (vP.x > 20.5) { vec4 tg = texture2D(uAtlas, vUV); if (tg.a < 0.5) discard; col *= tg.rgb * 1.1; }
         else if (vP.x > 19.5) col *= texture2D(uAtlas, vUV).rgb; else m = texMul(vP.x, vUV);
-        if (vP.x > 7.5 && vP.x < 8.5) {   // земля: пятна сухой и сочной травы, проплешины
-            float g1 = N(vW.xz / 34.0), g2 = N(vW.xz / 9.0 + 0.37);
-            col *= mix(vec3(1.07, 1.02, 0.86), vec3(0.88, 1.0, 0.9), g1) * (0.94 + 0.12 * g2);
+        if (vP.x > 7.5 && vP.x < 8.5) {
+            if (dot(col, vec3(0.333)) > 0.72) {   // снег: наветренные гребни и искры
+                float dr = N(vec2(vW.x / 30.0, vW.z / 6.0));
+                col *= 0.94 + 0.1 * dr;
+                col += vec3(0.3) * step(0.994, F(vW.xz * 3.0)) * clamp((26.0 - length(vW - uCam)) / 20.0, 0.0, 1.0);
+            } else {                              // земля: пятна сухой и сочной травы, проплешины
+                float g1 = N(vW.xz / 34.0), g2 = N(vW.xz / 9.0 + 0.37);
+                col *= mix(vec3(1.07, 1.02, 0.86), vec3(0.88, 1.0, 0.9), g1) * (0.94 + 0.12 * g2);
+            }
+        }
+        if (vP.x > 10.95 && vP.x < 11.95) {   // разметка (стёртая краска) и люки
+            float hw = (vP.x - 11.0) * 20.0, ax = abs(vUV.x);
+            float edge = step(abs(ax - (hw - 0.35)), 0.07);
+            float center = hw > 2.6 ? step(ax, 0.07) * step(fract(vUV.y / 6.0), 0.5) : 0.0;
+            float paint = max(edge, center) * smoothstep(0.25, 0.4, N(vUV * 1.7 + 5.0));
+            col = mix(col, vec3(0.86, 0.85, 0.8) / max(m, 0.5), paint * 0.85);
+            vec2 mh = vec2(ax - hw * 0.5, mod(vUV.y, 23.0) - 11.5); float r = length(mh);
+            if (r < 0.38) col *= r > 0.33 ? 0.55 : 0.68 + 0.1 * step(0.5, fract((mh.x + mh.y) * 6.0));
+        }
+        if (vP.x > 13.95 && vP.x < 14.95) {   // грунтовка в снегу: грязные колеи, белые обочины
+            float hw = (vP.x - 14.0) * 20.0, ax = abs(vUV.x);
+            float rut = exp(-(ax - 0.95) * (ax - 0.95) * 10.0);
+            col = mix(col, vec3(0.5, 0.46, 0.42), rut * 0.45);
+            col = mix(col, vec3(0.93, 0.94, 0.97), smoothstep(hw - 1.3, hw, ax) * 0.8);
         }
         if (vP.y > -999.0 && abs(n.y) < 0.5) m *= clamp((vW.y - vP.y) * 1.4 + 0.6, 0.6, 1.0);
         float ndl = max(dot(n, uSun), 0.0);
@@ -6166,7 +6221,14 @@ static void glBuildStatic() {
                 if (f < 2) { U[k] = q[k].z - oz; Vv[k] = q[k].y - oy; } else if (f < 4) { U[k] = q[k].x - ox; Vv[k] = q[k].z - oz; } else { U[k] = q[k].x - ox; Vv[k] = q[k].y - oy; }
             }
             float ao = (f == 2 || f == 3) ? -1000.0f : b.mn.y;
-            glQuadLit(V, q, kFaceN[f], glCol(b.col, 1), U, Vv, (float)b.tex, ao, b.glow ? 1.0f : 0.0f);
+            float tex = (float)b.tex;
+            if ((b.tex == TX_ROAD || b.tex == TX_DIRT) && f == 2) {
+                bool alongZ = (b.mx.z - b.mn.z) >= (b.mx.x - b.mn.x);
+                float hw = alongZ ? (b.mx.x - b.mn.x) * 0.5f : (b.mx.z - b.mn.z) * 0.5f, cx = (b.mn.x + b.mx.x) * 0.5f, cz = (b.mn.z + b.mx.z) * 0.5f;
+                for (int k = 0; k < 4; k++) { U[k] = alongZ ? q[k].x - cx : q[k].z - cz; Vv[k] = alongZ ? q[k].z - oz : q[k].x - ox; }
+                tex = (b.tex == TX_ROAD ? 11.0f : 14.0f) + clampf(hw, 0.5f, 18.5f) / 20.0f;
+            }
+            glQuadLit(V, q, kFaceN[f], glCol(b.col, 1), U, Vv, tex, ao, b.glow ? 1.0f : 0.0f);
         }
     }
     // сетки окружения: горы, воронки, гарь (камень — процедурная текстура)
@@ -6233,12 +6295,13 @@ static void glBuildStatic() {
         float fl = G.sea ? 4.0f : 0.0f, tx = G.sea ? 0.0f : (float)TX_GROUND;
         for (float z = z0; z < z1; z += 16)
             for (float x = x0; x < x1; x += 16) {
-                uint32_t h = hash2((int)(x / 16), (int)(z / 16));
-                uint32_t c = glCol(mixC(G.gcol1, G.gcol2, (h & 255) / 255.0f), 1);
                 V3 q[4] = {V3(x, gy, z), V3(x + 16, gy, z), V3(x + 16, gy, z + 16), V3(x, gy, z + 16)};
                 float bx0 = floorf(x / 256) * 256, bz0 = floorf(z / 256) * 256;
                 float U[4] = {x - bx0, x + 16 - bx0, x + 16 - bx0, x - bx0}, Vv[4] = {z - bz0, z - bz0, z + 16 - bz0, z + 16 - bz0};
-                glQuadLit(Gd, q, V3(0, 1, 0), c, U, Vv, tx, -1000, fl);
+                uint32_t cc[4];
+                for (int k = 0; k < 4; k++) { uint32_t h = hash2((int)floorf(q[k].x / 16), (int)floorf(q[k].z / 16)); cc[k] = glCol(mixC(G.gcol1, G.gcol2, (h & 255) / 255.0f), 1); }
+                static const int idx[6] = {0, 1, 2, 0, 2, 3};
+                for (int k = 0; k < 6; k++) { int i = idx[k]; glPush(Gd, q[i], V3(0, 1, 0), cc[i], U[i], Vv[i], tx, -1000, fl); }
             }
         float R = 4000;
         uint32_t c = glCol(mixC(G.gcol1, G.gcol2, 0.5f), 1);
@@ -6494,6 +6557,11 @@ static void glPresent(bool scene, int winW, int winH) {
     }
     GLF.UseProgram(g_pUI.id);
     GLF.ActiveTexture(gk::TEXTURE0); GLF.BindTexture(gk::TEXTURE_2D, g_glTexUI);
+    static int uiTexW = 640;
+    if (uiTexW != UIW) {   // ширина интерфейса поменялась (поворот, другой экран)
+        GLF.TexImage2D(gk::TEXTURE_2D, 0, (int)gk::RGBA, UIW, UIH, 0, gk::RGBA, gk::UNSIGNED_BYTE, nullptr);
+        uiTexW = UIW;
+    }
     GLF.TexSubImage2D(gk::TEXTURE_2D, 0, 0, 0, UIW, UIH, gk::RGBA, gk::UNSIGNED_BYTE, g_ui);
     GLF.Uniform1i(g_pUI.uTex, 0);
     GLF.Enable(gk::BLEND); GLF.BlendFunc(gk::SRC_ALPHA, gk::ONE_MINUS_SRC_ALPHA);
@@ -6569,6 +6637,7 @@ static void container(float x, float z, bool alongZ, uint32_t col, float y = 0) 
         else addDeco(x + k * 1.1f - 0.05f, y + 0.1f, z - hz - 0.03f, x + k * 1.1f + 0.05f, y + 2.5f, z + hz + 0.03f, shadeC(col, 0.75f));
     }
 }
+static void surface(float x0, float z0, float x1, float z1, float h, uint32_t col, int tex) { addDeco(x0, 0, z0, x1, h, z1, col); G.box.back().tex = (uint8_t)tex; }
 static void lamp(float x, float y, float z, uint32_t col) { addDeco(x - 0.15f, y - 0.08f, z - 0.15f, x + 0.15f, y, z + 0.15f, col, true); }
 static void grassPatch(float x0, float z0, float x1, float z1, int count, uint32_t col) {
     Grass g; g.mn = V3(x0, 0, z0); g.mx = V3(x1, 1.2f, z1); g.col = col;
@@ -6775,7 +6844,7 @@ static void crater(float x, float z, float r) {
 // пятно гари
 static void scorch(float x, float z, float r) {
     const int S = 10; int seed = (int)(x * 3 + z * 5); int t0 = (int)G.mtri.size();
-    V3 c(x, G.groundY + 0.025f, z);
+    V3 c(x, G.groundY + 0.045f, z);
     for (int j = 0; j < S; j++) {
         float a0 = j * 2 * PI_F / S, a1 = (j + 1) * 2 * PI_F / S;
         float r0 = r * (0.6f + 0.6f * hnoise(j * 0.9f, 0, seed)), r1 = r * (0.6f + 0.6f * hnoise((j + 1) % S * 0.9f, 0, seed));
@@ -7090,7 +7159,7 @@ static void stageM1(int s) {
     } break;
     case 1:
         say("Седой", "Неплохо. Теперь стойки. Присядь.");
-        setObjective("Присядьте", V3(), false); G.iv[0] = 0; break;
+        setObjective(g_lastDev == 0 ? "Присядьте: кнопка ПРИСЕД" : (g_lastDev == 1 ? "Присядьте: кнопка B" : "Присядьте: клавиша C"), V3(), false); G.iv[0] = 0; break;
     case 2: {
         say("Док", "Это осколочная. Чека, держишь — пошёл отсчёт. Не передержи.");
         say("Док", "Закинь её в окоп. Мишени не убегут, они деревянные.");
@@ -7125,7 +7194,7 @@ static void updateM1(float dt) {
     switch (G.stage) {
     case 0: if (countAlive(0) == 0 && G.stageT > 1) setStage(1); break;
     case 1:
-        if (G.iv[0] == 0 && G.P.stance == 1) { G.iv[0] = 1; say("Седой", "Теперь ляг."); setObjective("Лягте", V3(), false); }
+        if (G.iv[0] == 0 && G.P.stance == 1) { G.iv[0] = 1; say("Седой", "Теперь ляг."); setObjective(g_lastDev == 0 ? "Лягте: кнопка ЛЕЧЬ" : (g_lastDev == 1 ? "Лягте: удерживайте B" : "Лягте: клавиша Z"), V3(), false); }
         else if (G.iv[0] == 1 && G.P.stance == 2) { G.iv[0] = 2; say("Седой", "Встать. Бегом к Доку, на гранатную позицию."); setObjective("Бегом к гранатной позиции", V3(26, 0, 6), true); }
         else if (G.iv[0] == 2 && dist2D(G.P.pos, V3(26, 0, 6)) < 3) setStage(2);
         break;
@@ -7289,6 +7358,9 @@ static void updateM2(float dt) {
         int h = G.iv[2];
         g_amb.heli = 1.0f / (1.0f + len(G.veh[h].pos - G.P.pos) * 0.05f);
         allyScript("Седой", V3(-2, 0, 37)); allyScript("Док", V3(2, 0, 36)); allyScript("Сова", V3(0, 0, 34));
+        // из трюма метка ведёт сначала к трапу, на палубе — к носу
+        { bool inHold = G.P.pos.y < -1.5f; bool onStairs = inHold && fabsf(G.P.pos.x) < 1.5f && G.P.pos.z < 20.5f && G.P.pos.z > 11.5f && (G.P.pos.z > 18.5f || G.P.pos.y > -4.9f);
+          V3 w = inHold ? (onStairs ? V3(0, -0.3f, 11.6f) : V3(0, -5, 19.8f)) : V3(0, 0, 39); int st = inHold ? 1 : 2; if (G.iv[6] != st) { G.iv[6] = st; setObjective(inHold ? "К трапу — наверх, на палубу" : "Бегом к носу судна — вертолёт ждёт", w, true); } else G.wp = w; }
         if (G.P.pos.z > 38.3f && G.P.pos.y > -0.6f && G.storyNext != -2)
             showStory({"Прыжок! Седой ловит Кота за разгрузку.", "Судно Синдиката уходит под воду.", "Документы — у «Грома»."}, 4.5f, -2, true, RGBc(8, 10, 16));
         if (G.timer <= 0) missionFail("Судно затонуло.");
@@ -7312,6 +7384,15 @@ static void buildM3() {
     float bw[2] = {6, 30}, be[2] = {18, 42};
     for (float zc : bw) { addBox(-4.2f, 3.0f, zc - 2, -2.8f, 3.3f, zc + 2, RGBc(200, 190, 170)); addBox(-2.9f, 3.3f, zc - 2, -2.8f, 4.3f, zc + 2, RGBc(40, 40, 40), MT_METAL); }
     for (float zc : be) { addBox(2.8f, 3.0f, zc - 2, 4.2f, 3.3f, zc + 2, RGBc(200, 190, 170)); addBox(2.8f, 3.3f, zc - 2, 2.9f, 4.3f, zc + 2, RGBc(40, 40, 40), MT_METAL); }
+    // улица: асфальт с разметкой, бордюры, плиточные тротуары; рынок и переулок — брусчатка
+    surface(-2.9f, -2, 2.9f, 56, 0.03f, RGBc(92, 92, 94), TX_ROAD);
+    for (int sd = -1; sd <= 1; sd += 2) {
+        float a = sd * 2.9f, b = sd * 4.2f;
+        surface(std::min(a, b), -2, std::max(a, b), 56, 0.13f, RGBc(176, 170, 160), TX_TILES);
+        surface(std::min(a, a + sd * 0.16f), -2, std::max(a, a + sd * 0.16f), 56, 0.15f, RGBc(150, 148, 144), TX_CONCRETE);
+    }
+    surface(-22, 56, 22, 92, 0.025f, RGBc(150, 138, 120), TX_PAVING);
+    surface(-34, 102, 34, 111, 0.025f, RGBc(140, 132, 120), TX_PAVING);
     carProp(-2, 18, true, RGBc(150, 40, 35)); sandbags(-3.8f, 30, 1.0f, 30.8f); carProp(2.2f, 40, true, RGBc(45, 42, 40));
     crate(2.8f, 10, 0.5f, 1.0f); crate(-3, 46, 0.5f, 1.0f); barrel(3.4f, 25, RGBc(40, 90, 140));
     house(-34, 56, -22, 92, 8, kPastel[1]); house(22, 56, 34, 70, 7, kPastel[2]); house(22, 76, 34, 92, 9, kPastel[3]);
@@ -8011,7 +8092,7 @@ static void buildM8() {
         float x = ((h & 255) / 255.0f) * 92 - 46, z = (((h >> 8) & 1023) / 1023.0f) * 165;
         bool nearRadar = false;
         for (auto& r : kRadar) if (dist2D(V3(x, 0, z), r) < 6) nearRadar = true;
-        if (nearRadar || dist2D(V3(x, 0, z), kRally) < 5 || (x > 15 && x < 25 && z > 146)) continue;
+        if (nearRadar || dist2D(V3(x, 0, z), kRally) < 5 || (x > 15 && x < 25 && z > 146) || fabsf(x - 7.5f) < 5.5f) continue;
         if (k % 3 == 0) {
             float s = 1.2f + (h >> 20 & 3) * 0.5f;
             addBox(x - s, 0, z - s, x + s, 1.0f + (h >> 22 & 3) * 0.5f, z + s, rock, MT_CONCRETE, true);
@@ -8024,6 +8105,16 @@ static void buildM8() {
                 addDeco(x - w, y, z - w, x + w, y + 1.3f, z + w, pine);
                 addDeco(x - w * 0.8f, y + 1.3f, z - w * 0.8f, x + w * 0.8f, y + 1.45f, z + w * 0.8f, snowc);
             }
+        }
+    }
+    // грунтовка через перевал: колеи в снегу, отвалы по краям, вешки
+    surface(4.5f, -10, 10.5f, 170, 0.03f, RGBc(188, 184, 180), TX_DIRT);
+    for (int sd = -1; sd <= 1; sd += 2) {
+        float e = 7.5f + sd * 3.0f;
+        for (int k = 0; k < 18; k++) {
+            float z = -4 + k * 10.0f + (sd > 0 ? 5 : 0);
+            addDeco(e + sd * 0.5f - 0.04f, 0.3f, z - 0.04f, e + sd * 0.5f + 0.04f, 1.5f, z + 0.04f, RGBc(40, 40, 40));
+            addDeco(e + sd * 0.5f - 0.045f, 1.2f, z - 0.045f, e + sd * 0.5f + 0.045f, 1.45f, z + 0.045f, RGBc(210, 60, 40));
         }
     }
     sandbags(-4, 6, 4, 6.6f); addBox(-8, 0, 3, -6, 2.4f, 8, RGBc(120, 110, 95));
@@ -8097,7 +8188,7 @@ static void updateM8(float dt) {
         G.useHint = "";
         if (r >= 0) {
             V3 pp = kRadar[r] - V3(0, 0, 2.2f);
-            for (int i = 0; i < 3; i++) if (!G.iv[i] && dist2D(G.P.pos, kRadar[i] - V3(0, 0, 2.2f)) < 2.4f) { r = i; pp = kRadar[i] - V3(0, 0, 2.2f); G.useHint = "Заложить заряд (удерж.)"; }
+            for (int i = 0; i < 3; i++) if (!G.iv[i] && dist2D(G.P.pos, kRadar[i]) < 4.4f) { r = i; pp = kRadar[i] - V3(0, 0, 2.2f); G.useHint = "Заложить заряд (удерж.)"; }
             G.wp = pp;
             if (!G.useHint.empty() && G.P.useT >= 2.5f) {
                 G.iv[r] = 1; G.iv[5]++; G.useHint = ""; G.P.useT = 0;
@@ -8705,9 +8796,9 @@ static void saveAll() {
     std::string fn = g_prefPath + "save.txt";
     SDL_RWops* f = SDL_RWFromFile(fn.c_str(), "w");
     if (!f) return;
-    std::string s = fmt("unlocked %d\nbestkh %.2f\ncpm %d\ncps %d\ndone %d\nsens %.2f\npsens %.2f\ninv %d\nvol %d\nvib %d\nqual %d\ndiff %d\nfps %d\nrend %d\n",
+    std::string s = fmt("unlocked %d\nbestkh %.2f\ncpm %d\ncps %d\ndone %d\nsens %.2f\npsens %.2f\ninv %d\nvol %d\nvib %d\nqual %d\ndiff %d\nfps %d\nrend %d\nassist %d\n",
                         PR.unlocked, PR.bestKH, PR.cpMission, PR.cpStage, PR.done ? 1 : 0, S.lookSens, S.padSens, S.invertY ? 1 : 0,
-                        S.volume, S.vibration ? 1 : 0, S.quality, S.difficulty, S.showFps ? 1 : 0, S.renderer);
+                        S.volume, S.vibration ? 1 : 0, S.quality, S.difficulty, S.showFps ? 1 : 0, S.renderer, S.aimAssist ? 1 : 0);
     SDL_RWwrite(f, s.data(), 1, s.size());
     SDL_RWclose(f);
 }
@@ -8733,12 +8824,13 @@ static void loadAll() {
         std::string k = key;
         if (k == "unlocked") PR.unlocked = clampi((int)v, 1, NCH);
         else if (k == "bestkh") PR.bestKH = std::max(0.0f, v);
-        else if (k == "cpm") PR.cpMission = clampi((int)v, -1, 10);
+        else if (k == "cpm") PR.cpMission = clampi((int)v, -1, NCH - 1);
         else if (k == "cps") PR.cpStage = clampi((int)v, 0, 9);
         else if (k == "done") PR.done = v > 0.5f;
         else if (k == "sens") S.lookSens = clampf(v, 0.2f, 3.0f);
         else if (k == "psens") S.padSens = clampf(v, 0.2f, 3.0f);
         else if (k == "inv") S.invertY = v > 0.5f;
+        else if (k == "assist") S.aimAssist = v > 0.5f;
         else if (k == "vol") S.volume = clampi((int)v, 0, 10);
         else if (k == "vib") S.vibration = v > 0.5f;
         else if (k == "qual") S.quality = clampi((int)v, 0, 2);
@@ -8755,16 +8847,15 @@ enum TBtn { B_FIRE, B_ADS, B_RELOAD, B_STANCE, B_NADE, B_TAC, B_TACCYC, B_SWITCH
 struct TouchBtn { float x, y, r; const char* label; bool vis, held, pressed, released; float downT; };
 static TouchBtn g_btn[B_COUNT] = {
     {565, 250, 34, "ОГОНЬ", true, false, false, false, 0}, {600, 165, 24, "ПРИЦЕЛ", true, false, false, false, 0},
-    {488, 305, 22, "ПЕРЕЗ.", true, false, false, false, 0}, {596, 322, 22, "СТОЙКА", true, false, false, false, 0},
+    {488, 305, 22, "ПЕРЕЗ.", true, false, false, false, 0}, {596, 322, 22, "ПРИСЕД", true, false, false, false, 0},
     {498, 238, 22, "ГРАН.", true, false, false, false, 0}, {452, 278, 20, "ТАКТ.", true, false, false, false, 0},
-    {418, 232, 16, "ТИП", true, false, false, false, 0}, {528, 168, 22, "СМЕНА", true, false, false, false, 0},
+    {540, 330, 19, "ЛЕЧЬ", true, false, false, false, 0}, {528, 168, 22, "СМЕНА", true, false, false, false, 0},
     {540, 100, 19, "НАКЛ.Л", true, false, false, false, 0}, {600, 100, 19, "НАКЛ.П", true, false, false, false, 0},
     {450, 175, 22, "ДЫХАН.", false, false, false, false, 0}, {380, 300, 26, "ДЕЙСТВ.", false, false, false, false, 0},
     {474, 24, 19, "II", true, false, false, false, 0},
 };
 struct Finger { SDL_FingerID id; int role; float sx, sy, x, y, px, py; float t; bool on; int btn; };
 static Finger g_fin[10];
-static int g_lastDev = 2; // 0 тач, 1 геймпад, 2 клавиатура/мышь
 static bool g_touchAds = false;
 static float g_stickX = 0, g_stickY = 0, g_stickBX = 0, g_stickBY = 0; static bool g_stickOn = false;
 static float g_tapX = -1, g_tapY = -1;
@@ -8822,9 +8913,13 @@ static void touchFrame(float dt) {
     }
     const WState& W = G.P.w[G.P.slot];
     {
+        static float baseX[B_COUNT]; static bool init = false;
+        if (!init) { for (int b = 0; b < B_COUNT; b++) baseX[b] = g_btn[b].x; init = true; }
+        for (int b = 0; b < B_COUNT; b++) g_btn[b].x = baseX[b] + (baseX[b] > 320 ? (float)(UIW - 640) : 0.0f);   // к правому краю экрана
         bool tk = G.P.tank;
-        int hideInTank[7] = {B_RELOAD, B_STANCE, B_NADE, B_TAC, B_TACCYC, B_LEANL, B_LEANR};
+        int hideInTank[5] = {B_RELOAD, B_STANCE, B_NADE, B_TAC, B_TACCYC};
         for (int b : hideInTank) g_btn[b].vis = !tk;
+        g_btn[B_LEANL].vis = g_btn[B_LEANR].vis = false;   // наклоны убраны с экрана (остались на клавиатуре и геймпаде)
         g_btn[B_SWITCH].label = tk ? "СНАРЯД" : "СМЕНА";
     }
     g_btn[B_BREATH].vis = W.def == W_SNIPER && G.P.adsT > 0.5f && !G.P.tank;
@@ -8847,7 +8942,7 @@ static void touchFrame(float dt) {
     if (g_btn[B_STANCE].held && g_btn[B_STANCE].downT >= 0.4f && g_btn[B_STANCE].downT - dt < 0.4f) IN.prone = true;
     if (g_btn[B_NADE].held) IN.nadeHeld = true;
     if (g_btn[B_TAC].held) IN.tacHeld = true;
-    if (g_btn[B_TACCYC].pressed) IN.tacCycle = true;
+    if (g_btn[B_TACCYC].pressed) IN.prone = true;   // кнопка «ЛЕЧЬ» (вместо выбора тактической — та теперь меняется сама)
     if (g_btn[B_SWITCH].pressed) IN.sw = true;
     if (g_btn[B_LEANL].pressed) IN.leanL = true;
     if (g_btn[B_LEANR].pressed) IN.leanR = true;
@@ -9254,9 +9349,9 @@ static int menuList(const std::vector<MItem>& items, int cx, int y0, int w, int&
         uiRect(x, y, w, h, f ? ARGBc(170, 40, 40, 30) : ARGBc(130, 15, 18, 20));
         if (f && g_lastDev != 0) uiFrame(x - 2, y - 2, w + 4, h + 4, ARGBc(255, 255, 210, 40), 2);
         uiTextC(cx, y + 8, items[i].label.c_str(), items[i].enabled ? (f ? ARGBc(255, 255, 230, 120) : ARGBc(255, 230, 230, 230)) : ARGBc(255, 100, 100, 100));
-        if (g_tapX >= 0 && g_tapX >= x && g_tapX < x + w && g_tapY >= y && g_tapY < y + h && items[i].enabled) {
+        if (g_tapX >= 0 && g_tapX - g_uiOX >= x && g_tapX - g_uiOX < x + w && g_tapY >= y && g_tapY < y + h && items[i].enabled) {
             sel = i;
-            if (allowLR && lr && items[i].id >= 100) *lr = g_tapX < cx ? -1 : 1;
+            if (allowLR && lr && items[i].id >= 100) *lr = g_tapX - g_uiOX < cx ? -1 : 1;
             else act = items[i].id;
         }
     }
@@ -9710,10 +9805,11 @@ static int g_tip = 0;
 
 static void applyQuality() {
     if (g_useGL) return;
-    static const int qw[3] = {256, 320, 426}, qh[3] = {144, 180, 240};
+    static const int qh[3] = {144, 180, 240};
     int q = clampi(S.quality, 0, 2);
-    if (g_texScene && RW == qw[q] && RH == qh[q]) return;
-    rendResize(qw[q], qh[q]);
+    int w = (int)lroundf(qh[q] * (float)UIW / UIH);
+    if (g_texScene && RW == w && RH == qh[q]) return;
+    rendResize(w, qh[q]);
     if (g_texScene) SDL_DestroyTexture(g_texScene);
     SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "1");
     g_texScene = SDL_CreateTexture(g_ren, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, RW, RH);
@@ -9723,9 +9819,21 @@ static void updateDst() {
     if (g_useGL) SDL_GL_GetDrawableSize(g_win, &g_winW, &g_winH);
     else SDL_GetRendererOutputSize(g_ren, &g_winW, &g_winH);
     if (g_winW <= 0 || g_winH <= 0) { g_winW = 1280; g_winH = 720; }
+    // весь экран: холст интерфейса растягивается по ширине под соотношение сторон (до 2.7:1)
+    float aspect = g_winW / (float)g_winH;
+    UIW = clampi((int)lroundf(UIH * aspect), 640, UIW_MAX);
     float sc = std::min(g_winW / (float)UIW, g_winH / (float)UIH);
     g_dst.w = (int)(UIW * sc); g_dst.h = (int)(UIH * sc);
+    if (abs(g_dst.w - g_winW) <= 2) g_dst.w = g_winW;
+    if (abs(g_dst.h - g_winH) <= 2) g_dst.h = g_winH;
     g_dst.x = (g_winW - g_dst.w) / 2; g_dst.y = (g_winH - g_dst.h) / 2;
+    if (g_useGL) rendResize(std::max(64, (int)lroundf(180.0f * UIW / UIH)), 180);
+    else if (g_ren) {
+        applyQuality();
+        if (g_texUI) SDL_DestroyTexture(g_texUI);
+        g_texUI = SDL_CreateTexture(g_ren, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, UIW, UIH);
+        if (g_texUI) SDL_SetTextureBlendMode(g_texUI, SDL_BLENDMODE_BLEND);
+    }
     int ww = 0, wh = 0;
     SDL_GetWindowSize(g_win, &ww, &wh);
     g_mouseSX = ww > 0 ? (float)g_winW / ww : 1.0f; g_mouseSY = wh > 0 ? (float)g_winH / wh : 1.0f;
@@ -9931,6 +10039,7 @@ static void screenSettings() {
         {fmt("< Вибрация: %s >", S.vibration ? "Вкл" : "Выкл"), 104, true}, {fmt("< Качество графики: %s >", ql[clampi(S.quality, 0, 2)]), 105, true},
         {fmt("< Сложность: %s >", dl[clampi(S.difficulty, 0, 2)]), 106, true}, {fmt("< Показывать FPS: %s >", S.showFps ? "Да" : "Нет"), 107, true},
         {fmt("< Рендер: %s%s >", S.renderer == 0 ? "Видеокарта" : "Программный", (S.renderer == 0) != g_useGL ? " (после перезапуска)" : ""), 108, true},
+        {fmt("< Помощь в прицеливании (геймпад): %s >", S.aimAssist ? "Вкл" : "Выкл"), 109, true},
         {"Назад", 1, true}};
     int lr = 0;
     int act = menuList(it, UIW / 2, 50, 340, g_selSet, true, &lr);
@@ -9947,6 +10056,7 @@ static void screenSettings() {
         case 106: S.difficulty = (S.difficulty + lr + 3) % 3; break;
         case 107: S.showFps = !S.showFps; break;
         case 108: S.renderer = 1 - S.renderer; break;
+        case 109: S.aimAssist = !S.aimAssist; break;
         }
         playSnd(ST_BEEP, 0.3f, 0, 0, 0.05f, 0, 0, 770);
     }
@@ -9958,6 +10068,7 @@ static void screenBrief(float dt) {
     g_briefT += dt;
     const MissionInfo& M = MI[g_briefM];
     uiRect(0, 0, UIW, UIH, ARGBc(255, 12, 16, 20));
+    g_uiOX = (UIW - 640) / 2;
     drawMap(14, 40, 360, 300, g_briefM, g_briefT);
     if (M.vargas) drawVargas(20, 206);
     uiText(14, 6, fmt("ОПЕРАЦИЯ %s: %s", kRoman[M.op], OPS[M.op].name).c_str(), ARGBc(220, 200, 200, 200));
@@ -10026,6 +10137,7 @@ static void screenDefuse(float dt) {
     if (G.timer <= 0) { G.screen = SCR_PLAY; missionFail("Боеголовка сработала."); return; }
     uiRect(0, 0, UIW, UIH, ARGBc(150, 0, 0, 0));
     if (g_df.flash > 0) uiRect(0, 0, UIW, UIH, ARGBc((int)(g_df.flash * 120), 200, 30, 20));
+    g_uiOX = (UIW - 640) / 2;
     int px = 70, py = 40, pw = 250, ph = 250;
     uiRect(px, py, pw, ph, ARGBc(255, 36, 40, 38)); uiRect(px + 4, py + 4, pw - 8, ph - 8, ARGBc(255, 52, 58, 54));
     uiTextC(px + pw / 2, py + 12, "БОЕГОЛОВКА: ВЗРЫВАТЕЛЬ", ARGBc(255, 210, 210, 200));
@@ -10090,9 +10202,28 @@ static void screenEpilogue(float dt) {
 }
 
 // ------------------------------------------------------------ события
+// геймпад: известные контроллеры открываются сразу; для неизвестных добавляем стандартную раскладку
+static std::string g_padToast; static float g_padToastT = 0;
 static void openPad(int idx) {
-    if (g_pad || !SDL_IsGameController(idx)) return;
+    if (g_pad) return;
+    const char* jn = SDL_JoystickNameForIndex(idx);
+    std::string name = jn ? jn : "";
+    for (auto& ch : name) ch = (char)tolower((unsigned char)ch);
+    if (name.find("accelerometer") != std::string::npos || name.find("sensor") != std::string::npos) return;
+    if (!SDL_IsGameController(idx)) {
+        char guid[64]; SDL_JoystickGetGUIDString(SDL_JoystickGetDeviceGUID(idx), guid, sizeof guid);
+        std::string map = std::string(guid) + "," + (jn ? jn : "Gamepad") +
+            ",a:b0,b:b1,x:b2,y:b3,back:b4,guide:b5,start:b6,leftstick:b7,rightstick:b8,leftshoulder:b9,rightshoulder:b10,"
+            "dpup:b11,dpdown:b12,dpleft:b13,dpright:b14,leftx:a0,lefty:a1,rightx:a2,righty:a3,lefttrigger:a4,righttrigger:a5,";
+        SDL_GameControllerAddMapping(map.c_str());
+        if (!SDL_IsGameController(idx)) return;
+    }
     g_pad = SDL_GameControllerOpen(idx);
+    if (g_pad) {
+        const char* n = SDL_GameControllerName(g_pad);
+        g_padToast = std::string("Геймпад подключён: ") + (n ? n : "контроллер"); g_padToastT = 3.5f;
+        g_lastDev = 1; rumble(0.4f, 0.4f, 200);
+    }
 }
 static void handleEvent(const SDL_Event& e) {
     bool play = G.screen == SCR_PLAY;
@@ -10107,9 +10238,12 @@ static void handleEvent(const SDL_Event& e) {
     case SDL_FINGERMOTION: { float ux, uy; toUI(e.tfinger.x, e.tfinger.y, ux, uy); touchMove(e.tfinger.fingerId, ux, uy); } break;
     case SDL_FINGERUP: { float ux, uy; toUI(e.tfinger.x, e.tfinger.y, ux, uy); touchUp(e.tfinger.fingerId, ux, uy); } break;
     case SDL_CONTROLLERDEVICEADDED: openPad(e.cdevice.which); break;
+    case SDL_JOYDEVICEADDED: if (!SDL_IsGameController(e.jdevice.which)) openPad(e.jdevice.which); break;
     case SDL_CONTROLLERDEVICEREMOVED:
         if (g_pad && e.cdevice.which == SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(g_pad))) {
             SDL_GameControllerClose(g_pad); g_pad = nullptr;
+            g_padToast = "Геймпад отключён"; g_padToastT = 2.5f; if (g_lastDev == 1) g_lastDev = 0;
+            if (G.screen == SCR_PLAY) { G.screen = SCR_PAUSE; g_selPause = 0; }
             for (int i = 0; i < SDL_NumJoysticks(); i++) openPad(i);
             if (play) G.screen = SCR_PAUSE;
         }
@@ -10189,6 +10323,32 @@ static void handleEvent(const SDL_Event& e) {
     default: break;
     }
 }
+// помощь в прицеливании с геймпада: замедление на цели, доводка при прицеливании, лёгкое «прилипание»
+static float g_adsHeldT = 0;
+static void aimAssist(float dt, bool sticking) {
+    Player& P = G.P;
+    if (P.dead || P.tank) return;
+    g_adsHeldT = IN.ads ? g_adsHeldT + dt : 0;
+    V3 eye = playerEye();
+    float ay = aimYaw(), ap = aimPitch();
+    int best = -1; float bestA = 1e9f, bdy = 0, bdp = 0;
+    for (int i = 0; i < (int)G.act.size(); i++) {
+        const Actor& a = G.act[i];
+        if (!a.alive || a.team != 1 || a.hidden || (a.kind != AK_SOLDIER && a.kind != AK_DOG)) continue;
+        V3 c = actorChest(a); float d = len(c - eye);
+        if (d > 70 || d < 1) continue;
+        float dy = wrapPi(atan2f(c.x - eye.x, c.z - eye.z) - ay), dp = atan2f(c.y - eye.y, dist2D(c, eye)) - ap;
+        float ang = sqrtf(dy * dy + dp * dp), lim = atan2f(1.4f, d) + 2.5f * DEG;
+        if (ang < lim * 2.2f && ang < bestA && losClear(eye, c)) { bestA = ang; best = i; bdy = dy; bdp = dp; }
+    }
+    if (best < 0) return;
+    IN.lookX *= 0.55f; IN.lookY *= 0.55f;                                     // замедление на цели
+    float k = 0;
+    if (IN.ads && g_adsHeldT < 0.3f) k = std::min(1.0f, dt * 14);           // доводка при вскидывании оружия
+    else if (sticking || IN.fire) k = std::min(1.0f, dt * (IN.ads ? 4.0f : 2.0f));
+    P.yaw = wrapPi(P.yaw + bdy * k);
+    P.pitch += bdp * k;
+}
 static float padAxis(SDL_GameControllerAxis a) {
     if (!g_pad) return 0;
     return SDL_GameControllerGetAxis(g_pad, a) / 32767.0f;
@@ -10227,6 +10387,7 @@ static void pollInput(float dt) {
             }
             if (lt > 0.3f) IN.ads = true;
             if (rt > 0.3f) IN.fire = true;
+            if (S.aimAssist && g_lastDev == 1) aimAssist(dt, rl > 0.15f);
             if (SDL_GameControllerGetButton(g_pad, SDL_CONTROLLER_BUTTON_RIGHTSHOULDER)) IN.nadeHeld = true;
             if (SDL_GameControllerGetButton(g_pad, SDL_CONTROLLER_BUTTON_LEFTSHOULDER)) IN.tacHeld = true;
             if (SDL_GameControllerGetButton(g_pad, SDL_CONTROLLER_BUTTON_A)) IN.useHeld = true;
@@ -10252,6 +10413,8 @@ int main(int argc, char* argv[]) {
     SDL_SetHint(SDL_HINT_ORIENTATIONS, "LandscapeLeft LandscapeRight");
     SDL_SetHint(SDL_HINT_TOUCH_MOUSE_EVENTS, "0");
     SDL_SetHint(SDL_HINT_ANDROID_TRAP_BACK_BUTTON, "1");
+    SDL_SetHint(SDL_HINT_ACCELEROMETER_AS_JOYSTICK, "0");
+    SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS) != 0) { SDL_Log("SDL_Init: %s", SDL_GetError()); return 1; }
     SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER);
     fontInit();
@@ -10317,7 +10480,7 @@ int main(int argc, char* argv[]) {
         bool scene = false;
         int scr = G.screen;
         if (scr == SCR_PLAY) {
-            if (IN.pause) { G.screen = SCR_PAUSE; g_selPause = 0; }
+            if (IN.pause) { G.screen = SCR_PAUSE; g_selPause = 0; IN.pause = false; IN.back = false; }   // иначе меню паузы сразу закрывалось тем же нажатием
             else gameUpdate(dt);
         }
         if (scr == SCR_CUTSCENE) { csUpdate(dt); scr = G.screen; }
@@ -10330,6 +10493,7 @@ int main(int argc, char* argv[]) {
             if (scr == SCR_PLAY) { drawHUD(); drawStory(); drawTouch(); }
             if (G.fadeIn > 0) { uiRect(0, 0, UIW, UIH, ARGBc((int)(255 * G.fadeIn), 0, 0, 0)); G.fadeIn -= dt * 1.5f; }
         }
+        g_uiOX = 0;
         switch (G.screen) {
         case SCR_MENU: screenMenu(); break;
         case SCR_SELECT: screenSelect(); break;
@@ -10341,6 +10505,14 @@ int main(int argc, char* argv[]) {
         case SCR_EPILOGUE: screenEpilogue(dt); break;
         case SCR_DEFUSE: screenDefuse(dt); break;
         default: break;
+        }
+        g_uiOX = 0;
+        if (g_padToastT > 0) {
+            g_padToastT -= dt;
+            float a = clampf(g_padToastT, 0, 1);
+            int w = (int)g_padToast.size() * 4 + 30;
+            uiRect(UIW / 2 - w / 2, UIH - 64, w, 18, ARGBc((int)(170 * a), 10, 12, 14));
+            uiTextC(UIW / 2, UIH - 58, g_padToast.c_str(), ARGBc((int)(255 * a), 140, 230, 160));
         }
         if (G.screen != SCR_PLAY) { g_amb.breath = 0; g_amb.heart = 0; }
         audioSync();
