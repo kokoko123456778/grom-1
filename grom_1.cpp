@@ -1254,7 +1254,8 @@ static int g_lastDev = 2; // последнее устройство ввода:
 struct MTri { V3 a, b, c; uint32_t col; };                 // статичный треугольник окружения (горы, воронки)
 struct MGroup { V3 c; float r; int t0, t1; };               // группа треугольников для отсечения
 struct Prop { V3 c; Basis B; V3 h; uint32_t col; };         // повёрнутый брус (ежи, проволока, обломки)
-struct Plume { V3 p; float size, acc; bool fire; };         // столб дыма на горизонте/пожар
+struct Plume { V3 p; float size, acc; bool fire; };
+struct LampL { V3 p; uint32_t col; float r; };            // точечный свет фонаря         // столб дыма на горизонте/пожар
 struct Tuft { V3 p; float h; uint32_t col; };              // кустик травы на открытой земле (программный режим)
 // маска травяного ковра уровня: 1 текстель на метр; R — густота, G — сухость
 static std::vector<uint8_t> g_gmask; static int g_gmW = 0, g_gmH = 0, g_gmSerial = 0; static float g_gmX0 = 0, g_gmZ0 = 0;
@@ -1263,13 +1264,13 @@ struct Game {
     int screen = SCR_MENU, prevScreen = SCR_MENU; int mission = 0, stage = 0; float stageT = 0, missionT = 0;
     std::vector<Box> box; std::vector<CoverPt> cover; std::vector<Grass> grass;
     std::vector<Prism> prisms;
-    std::vector<MTri> mtri; std::vector<MGroup> mgrp; std::vector<Prop> props; std::vector<Plume> plumes; std::vector<Tuft> lawn; bool war = false; float warT = 3;
+    std::vector<MTri> mtri; std::vector<MGroup> mgrp; std::vector<Prop> props; std::vector<Plume> plumes; std::vector<LampL> lamps; std::vector<Tuft> lawn; bool war = false; float warT = 3;
     std::vector<Actor> act; std::vector<Vehicle> veh; std::vector<Grenade> gren; std::vector<Bullet> bul;
     std::vector<Part> parts; std::vector<Smoke> smoke; std::vector<Tracer> tracers; std::vector<HitInd> hits; std::vector<Sub> subs;
     Player P;
     float groundY = 0; bool hasGround = true; uint32_t gcol1 = 0, gcol2 = 0; bool sea = false; V3 bmin, bmax; float farZ = 160;
     bool snow = false; std::string warn; float warnT = 0;
-    bool rain = false; float roll = 0, tilt = 0, waterY = -100; bool waterOn = false; V3 waterMn, waterMx; bool lightning = false;
+    bool rain = false; float roll = 0, tilt = 0, waterY = -100; bool waterOn = false; V3 waterMn, waterMx; float holeX0 = 0, holeZ0 = 0, holeX1 = 0, holeZ1 = 0; bool lightning = false;
     float lightT = 0;
     std::string objective; float objT = 0; V3 wp; bool wpOn = false;
     float timer = 0; bool timerOn = false; std::string timerLabel; float progress = 0; bool progOn = false; std::string progLabel;
@@ -1305,6 +1306,18 @@ static int addBox(float x0, float y0, float z0, float x1, float y1, float z1, ui
 static void addDeco(float x0, float y0, float z0, float x1, float y1, float z1, uint32_t col, bool glow = false) {
     int i = addBox(x0, y0, z0, x1, y1, z1, col);
     G.box[i].solid = false; G.box[i].glow = glow; G.box[i].tex = (uint8_t)(g_defTex >= 0 ? g_defTex : TX_NONE);
+}
+// плитка земли/моря минус вырез (корпус судна): до 4 прямоугольников
+static int groundPieces(float x0, float z0, float x1, float z1, float out[4][4]) {
+    float hx0 = G.holeX0, hx1 = G.holeX1, hz0 = G.holeZ0, hz1 = G.holeZ1;
+    if (hx1 <= hx0 || hx1 <= x0 || hx0 >= x1 || hz1 <= z0 || hz0 >= z1) { out[0][0] = x0; out[0][1] = z0; out[0][2] = x1; out[0][3] = z1; return 1; }
+    int n = 0;
+    float cz0 = std::max(z0, hz0), cz1 = std::min(z1, hz1);
+    if (hz0 > z0) { out[n][0] = x0; out[n][1] = z0; out[n][2] = x1; out[n][3] = hz0; n++; }
+    if (hz1 < z1) { out[n][0] = x0; out[n][1] = hz1; out[n][2] = x1; out[n][3] = z1; n++; }
+    if (hx0 > x0) { out[n][0] = x0; out[n][1] = cz0; out[n][2] = hx0; out[n][3] = cz1; n++; }
+    if (hx1 < x1) { out[n][0] = hx1; out[n][1] = cz0; out[n][2] = x1; out[n][3] = cz1; n++; }
+    return n;
 }
 static bool rayAABB(V3 o, V3 d, V3 mn, V3 mx, float& t0, float& t1) {
     float tmin = -1e30f, tmax = 1e30f;
@@ -2503,7 +2516,7 @@ static void updateEffects(float dt) {
 // =====================================================================
 struct Input {
     float mx = 0, my = 0, lookX = 0, lookY = 0;
-    bool fire = false, ads = false, reload = false, stance = false, prone = false, nadeHeld = false, tacHeld = false, sw = false;
+    bool fire = false, ads = false, reload = false, stance = false, stanceCycle = false, prone = false, nadeHeld = false, tacHeld = false, sw = false;
     bool sprint = false, breath = false, leanL = false, leanR = false, use = false, useHeld = false, pause = false, tacCycle = false;
     int sel = 0;   // 1/2 — прямой выбор оружия или снаряда
     bool up = false, down = false, left = false, right = false, accept = false, back = false;
@@ -2774,6 +2787,10 @@ static void playerUpdate(float dt) {
     g_swayX = (sinf(P.swayT * 0.9f) * 0.7f + sinf(P.swayT * 2.3f) * 0.3f) * amp * DEG;
     g_swayY = (sinf(P.swayT * 1.7f) * 0.6f + cosf(P.swayT * 0.6f) * 0.4f) * amp * 0.7f * DEG;
     // ---- стойки
+    if (IN.stanceCycle) {   // сенсорная «ПРИСЕД»: 1-е нажатие — присесть, 2-е — лечь, 3-е — встать
+        int ns = P.stance == 0 ? 1 : P.stance == 1 ? (carrying ? 0 : 2) : 0;
+        P.stance = ns; playSnd(ST_STEP, ns == 2 ? 0.35f : 0.25f, 0, 0, 0.15f, 0, 0.3f);
+    }
     if (IN.stance) { P.stance = P.stance == 1 ? 0 : 1; playSnd(ST_STEP, 0.25f, 0, 0, 0.15f, 0, 0.3f); }
     if (IN.prone && !carrying) { P.stance = P.stance == 2 ? 1 : 2; playSnd(ST_STEP, 0.35f, 0, 0, 0.2f, 0, 0.2f); }
     if (carrying && P.stance == 2) P.stance = 1;
@@ -5354,6 +5371,11 @@ static void drawGround() {
                     uint32_t col = mixC(G.gcol1, G.gcol2, (h & 255) / 255.0f);
                     if (G.sea) col = shadeC(col, 0.8f + 0.4f * fabsf(sinf(G.time * 1.3f + (h & 63) * 0.3f)));
                     float s = faceShade(V3(0, 1, 0));
+                    float pc[4][4]; int np = groundPieces(x0, z0, x0 + 16, z0 + 16, pc);
+                    if (np != 1 || pc[0][2] - pc[0][0] < 15.9f || pc[0][3] - pc[0][1] < 15.9f) {
+                        for (int p = 0; p < np; p++) drawQuadW(V3(pc[p][0], gy, pc[p][1]), V3(pc[p][2], gy, pc[p][1]), V3(pc[p][2], gy, pc[p][3]), V3(pc[p][0], gy, pc[p][3]), shadeC(col, s), RM_OPAQUE);
+                        continue;
+                    }
                     if (!G.sea && len(c - cp) < 70) {
                         V3 q[4] = {toCam(V3(x0, gy, z0)), toCam(V3(x0 + 16, gy, z0)), toCam(V3(x0 + 16, gy, z0 + 16)), toCam(V3(x0, gy, z0 + 16))};
                         float U[4] = {x0, x0 + 16, x0 + 16, x0}, Vv[4] = {z0, z0, z0 + 16, z0 + 16};
@@ -5507,6 +5529,12 @@ static void drawDynamic() {
         drawSprite(p.p, p.size, c, p.mode);
     }
     for (const Tracer& t : G.tracers) drawLine3D(t.a, t.b, t.col, RM_ADD);
+    std::vector<const Box*> roofs;   // перекрытия рядом с камерой
+    if (G.snow || G.rain)
+        for (const Box& b : G.box)
+            if (b.mx.y > g_cam.pos.y - 5 && b.mn.y > G.groundY + 1.0f && b.mn.x < g_cam.pos.x + 16 && b.mx.x > g_cam.pos.x - 16 && b.mn.z < g_cam.pos.z + 16 && b.mx.z > g_cam.pos.z - 16 &&
+                (b.mx.x - b.mn.x) * (b.mx.z - b.mn.z) >= 2.0f) roofs.push_back(&b);
+    auto underRoof = [&](const V3& p) { for (const Box* b : roofs) if (p.x > b->mn.x && p.x < b->mx.x && p.z > b->mn.z && p.z < b->mx.z && p.y < b->mn.y) return true; return false; };
     if (G.snow) {
         for (int i = 0; i < 220; i++) {
             uint32_t h = hash2(i, 9);
@@ -5518,7 +5546,7 @@ static void drawDynamic() {
             while (p.x > g_cam.pos.x + 15) p.x -= 30;
             while (p.z < g_cam.pos.z - 15) p.z += 30;
             while (p.z > g_cam.pos.z + 15) p.z -= 30;
-            if (len(p - g_cam.pos) < 1.5f) continue;
+            if (len(p - g_cam.pos) < 1.5f || underRoof(p)) continue;
             drawSprite(p, 0.05f, RGBc(235, 238, 245), RM_OPAQUE);
         }
     }
@@ -5533,7 +5561,7 @@ static void drawDynamic() {
             if (p.x > g_cam.pos.x + 12) p.x -= 24;
             if (p.z < g_cam.pos.z - 12) p.z += 24;
             if (p.z > g_cam.pos.z + 12) p.z -= 24;
-            if (len(p - g_cam.pos) < 1.5f) continue;
+            if (len(p - g_cam.pos) < 1.5f || underRoof(p)) continue;
             drawLine3D(p, p + V3(0.3f, -0.6f, 0), RGBc(60, 65, 75), RM_ADD);
         }
     }
@@ -5741,6 +5769,7 @@ struct GLFn {
     void(GROM_GLAPI* Uniform2f)(int, float, float);
     void(GROM_GLAPI* Uniform3f)(int, float, float, float);
     void(GROM_GLAPI* Uniform4f)(int, float, float, float, float);
+    void(GROM_GLAPI* Uniform4fv)(int, int, const float*);
     void(GROM_GLAPI* UniformMatrix4fv)(int, int, unsigned char, const float*);
     void(GROM_GLAPI* GenBuffers)(int, unsigned*);
     void(GROM_GLAPI* BindBuffer)(unsigned, unsigned);
@@ -5784,7 +5813,7 @@ static bool glLoadAll() {
     GL_L(Clear); GL_L(ClearColor); GL_L(Viewport); GL_L(Enable); GL_L(Disable); GL_L(BlendFunc); GL_L(DepthMask); GL_L(DepthFunc);
     GL_L(PolygonOffset); GL_L(CreateShader); GL_L(ShaderSource); GL_L(CompileShader); GL_L(GetShaderiv); GL_L(GetShaderInfoLog);
     GL_L(CreateProgram); GL_L(AttachShader); GL_L(BindAttribLocation); GL_L(LinkProgram); GL_L(GetProgramiv); GL_L(GetProgramInfoLog);
-    GL_L(UseProgram); GL_L(GetUniformLocation); GL_L(Uniform1i); GL_L(Uniform1f); GL_L(Uniform2f); GL_L(Uniform3f); GL_L(Uniform4f);
+    GL_L(UseProgram); GL_L(GetUniformLocation); GL_L(Uniform1i); GL_L(Uniform1f); GL_L(Uniform2f); GL_L(Uniform3f); GL_L(Uniform4f); GL_L(Uniform4fv);
     GL_L(UniformMatrix4fv); GL_L(GenBuffers); GL_L(BindBuffer); GL_L(BufferData); GL_L(DeleteBuffers); GL_L(EnableVertexAttribArray);
     GL_L(DisableVertexAttribArray); GL_L(VertexAttribPointer); GL_L(DrawArrays); GL_L(GenTextures); GL_L(BindTexture); GL_L(TexImage2D);
     GL_L(TexSubImage2D); GL_L(TexParameteri); GL_L(ActiveTexture); GL_L(DeleteTextures); GL_L(GenFramebuffers); GL_L(BindFramebuffer);
@@ -5830,6 +5859,7 @@ precision mediump float;
 #endif
 #endif
 uniform vec3 uSun; uniform vec3 uSunCol; uniform vec3 uSkyAmb; uniform vec3 uGndAmb;
+uniform vec4 uLP[6]; uniform vec4 uLC[6];
 uniform vec3 uFog; uniform vec2 uFogR; uniform vec3 uCam; uniform float uTime; uniform float uShadowOn; uniform float uShadowTexel;
 uniform sampler2D uNoise; uniform sampler2D uShadow; uniform sampler2D uAtlas; uniform sampler2D uGMask;
 uniform vec4 uGRect; uniform vec3 uGrassA; uniform vec3 uGrassB;
@@ -5909,9 +5939,13 @@ void main() {
     } else if (fl < 0.5) {
         vec3 n = normalize(vN);
         float m = 1.0;
+        if (vP.x > 20.5) {   // трава у самой камеры (лёжа) растворяется, а не закрывает экран мутными пятнами
+            float dc = length(vW - uCam);
+            if (dc < 1.9 && H(floor(gl_FragCoord.xy)) > (dc - 0.5) / 1.4) discard;
+        }
         if (vP.x > 21.5) {   // травяной ковёр: густота и сухость из маски уровня
             vec4 mk = texture2D(uGMask, (vW.xz - uGRect.xy) * uGRect.zw);
-            if (mk.r < c.a) discard;
+            if (mk.r < max(c.a, 0.03)) discard;   // порог 0: пучки с нулевым порогом росли бы и на дорогах, и в зданиях
             vec4 tg = texture2D(uAtlas, vUV); if (tg.a < 0.5) discard;
             vec3 gc = mix(uGrassA, uGrassB, mk.g) * (0.92 + 0.16 * N(vW.xz / 7.0));
             col = gc * col * tg.rgb * 1.25; a = 1.0;
@@ -5948,7 +5982,13 @@ void main() {
         vec3 amb = mix(uGndAmb, uSkyAmb, n.y * 0.5 + 0.5);
         vec3 v = normalize(uCam - vW);
         float spec = pow(max(dot(reflect(-uSun, n), v), 0.0), 24.0) * 0.12 * sh;
-        col = col * m * (amb + uSunCol * ndl * sh) + uSunCol * spec;
+        vec3 lit = vec3(0.0);
+        for (int i = 0; i < 6; i++) {   // фонари
+            vec3 L = uLP[i].xyz - vW; float d2 = dot(L, L), r = uLP[i].w;
+            float att = max(1.0 - d2 / (r * r + 0.001), 0.0); att *= att;
+            lit += uLC[i].rgb * att * (0.25 + 0.75 * max(dot(n, L * inversesqrt(d2 + 0.0001)), 0.0));
+        }
+        col = col * m * (amb + uSunCol * ndl * sh + lit) + uSunCol * spec;
     }
     float d = length(vW - uCam);
     float f = clamp((d - uFogR.x) / (uFogR.y - uFogR.x), 0.0, 1.0);
@@ -6079,7 +6119,7 @@ void main() { gl_FragColor = texture2D(uTex, vUV).bgra; }
 )";
 
 struct GLProg { unsigned id = 0; int uVP = -1, uSVP = -1, uSun = -1, uSunCol = -1, uSkyAmb = -1, uGndAmb = -1, uFog = -1, uFogR = -1, uCam = -1, uTime = -1,
-                uShadowOn = -1, uShadowTexel = -1, uNoise = -1, uShadow = -1, uTop = -1, uHor = -1, uFlash = -1, uTex = -1, uFx = -1, uTint = -1, uAspect = -1, uAtlas = -1, uCloud = -1, uWind = -1, uTileOff = -1, uGMask = -1, uGRect = -1, uGrassA = -1, uGrassB = -1; };
+                uShadowOn = -1, uShadowTexel = -1, uNoise = -1, uShadow = -1, uTop = -1, uHor = -1, uFlash = -1, uTex = -1, uFx = -1, uTint = -1, uAspect = -1, uAtlas = -1, uCloud = -1, uWind = -1, uTileOff = -1, uGMask = -1, uGRect = -1, uGrassA = -1, uGrassB = -1, uLP = -1, uLC = -1; };
 static GLProg g_pMain, g_pDepth, g_pSky, g_pPost, g_pUI;
 static unsigned g_texNoise = 0, g_texAtlas = 0, g_glTexUI = 0, g_vboStatic = 0, g_vboGround = 0, g_vboDyn = 0, g_vboQuad = 0, g_vboGrass = 0, g_vboTileD = 0, g_vboTileS = 0, g_texGMask = 0;
 static int g_nStatic = 0, g_nGround = 0, g_nGrass = 0, g_nTileD = 0, g_nTileS = 0, g_gmUploaded = -1, g_levelSerial = 0, g_builtSerial = -1;
@@ -6108,11 +6148,13 @@ static bool glMakeProg(GLProg& P, const char* vs, const char* fs, const char* co
     GLF.LinkProgram(P.id);
     int ok = 0; GLF.GetProgramiv(P.id, gk::LINK_STATUS, &ok);
     if (!ok) { char log[1024]; int n = 0; GLF.GetProgramInfoLog(P.id, 1023, &n, log); log[std::max(0, std::min(n, 1023))] = 0; SDL_Log("Программа: %s", log); return false; }
-    const char* names[29] = {"uVP", "uSVP", "uSun", "uSunCol", "uSkyAmb", "uGndAmb", "uFog", "uFogR", "uCam", "uTime", "uShadowOn", "uShadowTexel",
-                             "uNoise", "uShadow", "uTop", "uHor", "uFlash", "uTex", "uFx", "uTint", "uAspect", "uAtlas", "uCloud", "uWind", "uTileOff", "uGMask", "uGRect", "uGrassA", "uGrassB"};
-    int* slots[29] = {&P.uVP, &P.uSVP, &P.uSun, &P.uSunCol, &P.uSkyAmb, &P.uGndAmb, &P.uFog, &P.uFogR, &P.uCam, &P.uTime, &P.uShadowOn, &P.uShadowTexel,
-                      &P.uNoise, &P.uShadow, &P.uTop, &P.uHor, &P.uFlash, &P.uTex, &P.uFx, &P.uTint, &P.uAspect, &P.uAtlas, &P.uCloud, &P.uWind, &P.uTileOff, &P.uGMask, &P.uGRect, &P.uGrassA, &P.uGrassB};
-    for (int i = 0; i < 29; i++) *slots[i] = GLF.GetUniformLocation(P.id, names[i]);
+    const char* names[31] = {"uVP", "uSVP", "uSun", "uSunCol", "uSkyAmb", "uGndAmb", "uFog", "uFogR", "uCam", "uTime", "uShadowOn", "uShadowTexel",
+                             "uNoise", "uShadow", "uTop", "uHor", "uFlash", "uTex", "uFx", "uTint", "uAspect", "uAtlas", "uCloud", "uWind", "uTileOff", "uGMask", "uGRect", "uGrassA", "uGrassB", "uLP", "uLC"};
+    int* slots[31] = {&P.uVP, &P.uSVP, &P.uSun, &P.uSunCol, &P.uSkyAmb, &P.uGndAmb, &P.uFog, &P.uFogR, &P.uCam, &P.uTime, &P.uShadowOn, &P.uShadowTexel,
+                      &P.uNoise, &P.uShadow, &P.uTop, &P.uHor, &P.uFlash, &P.uTex, &P.uFx, &P.uTint, &P.uAspect, &P.uAtlas, &P.uCloud, &P.uWind, &P.uTileOff, &P.uGMask, &P.uGRect, &P.uGrassA, &P.uGrassB, &P.uLP, &P.uLC};
+    for (int i = 0; i < 31; i++) *slots[i] = GLF.GetUniformLocation(P.id, names[i]);
+    if (P.uLP < 0) P.uLP = GLF.GetUniformLocation(P.id, "uLP[0]");
+    if (P.uLC < 0) P.uLC = GLF.GetUniformLocation(P.id, "uLC[0]");
     return true;
 }
 static void glTexParams(bool linear, bool repeat) {
@@ -6295,13 +6337,23 @@ static void glBuildStatic() {
         float fl = G.sea ? 4.0f : 0.0f, tx = G.sea ? 0.0f : (float)TX_GROUND;
         for (float z = z0; z < z1; z += 16)
             for (float x = x0; x < x1; x += 16) {
-                V3 q[4] = {V3(x, gy, z), V3(x + 16, gy, z), V3(x + 16, gy, z + 16), V3(x, gy, z + 16)};
+                float pc[4][4]; int np = groundPieces(x, z, x + 16, z + 16, pc);
                 float bx0 = floorf(x / 256) * 256, bz0 = floorf(z / 256) * 256;
-                float U[4] = {x - bx0, x + 16 - bx0, x + 16 - bx0, x - bx0}, Vv[4] = {z - bz0, z - bz0, z + 16 - bz0, z + 16 - bz0};
-                uint32_t cc[4];
-                for (int k = 0; k < 4; k++) { uint32_t h = hash2((int)floorf(q[k].x / 16), (int)floorf(q[k].z / 16)); cc[k] = glCol(mixC(G.gcol1, G.gcol2, (h & 255) / 255.0f), 1); }
-                static const int idx[6] = {0, 1, 2, 0, 2, 3};
-                for (int k = 0; k < 6; k++) { int i = idx[k]; glPush(Gd, q[i], V3(0, 1, 0), cc[i], U[i], Vv[i], tx, -1000, fl); }
+                for (int p = 0; p < np; p++) {
+                    float ax = pc[p][0], az = pc[p][1], bx = pc[p][2], bz = pc[p][3];
+                    V3 q[4] = {V3(ax, gy, az), V3(bx, gy, az), V3(bx, gy, bz), V3(ax, gy, bz)};
+                    float U[4] = {ax - bx0, bx - bx0, bx - bx0, ax - bx0}, Vv[4] = {az - bz0, az - bz0, bz - bz0, bz - bz0};
+                    uint32_t cc[4];
+                    for (int k = 0; k < 4; k++) {   // цвет — билинейно от углов плитки 16 м: стыков нет
+                        float fx = (q[k].x - x) / 16, fz = (q[k].z - z) / 16;
+                        uint32_t h00 = hash2((int)floorf(x / 16), (int)floorf(z / 16)), h10 = hash2((int)floorf(x / 16) + 1, (int)floorf(z / 16));
+                        uint32_t h01 = hash2((int)floorf(x / 16), (int)floorf(z / 16) + 1), h11 = hash2((int)floorf(x / 16) + 1, (int)floorf(z / 16) + 1);
+                        float t = ((h00 & 255) * (1 - fx) * (1 - fz) + (h10 & 255) * fx * (1 - fz) + (h01 & 255) * (1 - fx) * fz + (h11 & 255) * fx * fz) / 255.0f;
+                        cc[k] = glCol(mixC(G.gcol1, G.gcol2, t), 1);
+                    }
+                    static const int idx[6] = {0, 1, 2, 0, 2, 3};
+                    for (int k = 0; k < 6; k++) { int i = idx[k]; glPush(Gd, q[i], V3(0, 1, 0), cc[i], U[i], Vv[i], tx, -1000, fl); }
+                }
             }
         float R = 4000;
         uint32_t c = glCol(mixC(G.gcol1, G.gcol2, 0.5f), 1);
@@ -6385,6 +6437,24 @@ static void glSetMain(const float* vp) {
     GLF.Uniform2f(P.uFogR, g_env.fogS, g_env.fogE);
     GLF.Uniform3f(P.uCam, g_cam.pos.x, g_cam.pos.y, g_cam.pos.z);
     GLF.Uniform1f(P.uTime, G.time);
+    if (P.uLP >= 0 && GLF.Uniform4fv) {   // 6 ближайших к камере фонарей
+        float lp[24] = {0}, lc[24] = {0};
+        int pick[6] = {-1, -1, -1, -1, -1, -1}; float pd[6] = {1e9f, 1e9f, 1e9f, 1e9f, 1e9f, 1e9f};
+        for (int i = 0; i < (int)G.lamps.size(); i++) {
+            float d = len(G.lamps[i].p - g_cam.pos) - G.lamps[i].r;
+            if (d > 45) continue;
+            for (int k = 0; k < 6; k++) if (d < pd[k]) { for (int j = 5; j > k; j--) { pd[j] = pd[j - 1]; pick[j] = pick[j - 1]; } pd[k] = d; pick[k] = i; break; }
+        }
+        float night = clampf(1.25f - g_env.sunI * 0.9f, 0.35f, 1.15f);
+        for (int k = 0; k < 6; k++) {
+            if (pick[k] < 0) { lp[k * 4 + 3] = 0.01f; continue; }
+            const LampL& L = G.lamps[pick[k]];
+            float c[3]; cv3(L.col, c);
+            lp[k * 4] = L.p.x; lp[k * 4 + 1] = L.p.y; lp[k * 4 + 2] = L.p.z; lp[k * 4 + 3] = L.r;
+            for (int j = 0; j < 3; j++) lc[k * 4 + j] = c[j] * 1.6f * night;
+        }
+        GLF.Uniform4fv(P.uLP, 6, lp); GLF.Uniform4fv(P.uLC, 6, lc);
+    }
     if (P.uWind >= 0) GLF.Uniform4f(P.uWind, fmodf(G.time, 1000.0f), G.groundY, g_cam.pos.x, g_cam.pos.z);
     GLF.Uniform1f(P.uShadowOn, g_glShadows ? 1.0f : 0.0f);
     GLF.Uniform1f(P.uShadowTexel, 0.7f / std::max(1, g_sfboSize));
@@ -6638,7 +6708,10 @@ static void container(float x, float z, bool alongZ, uint32_t col, float y = 0) 
     }
 }
 static void surface(float x0, float z0, float x1, float z1, float h, uint32_t col, int tex) { addDeco(x0, 0, z0, x1, h, z1, col); G.box.back().tex = (uint8_t)tex; }
-static void lamp(float x, float y, float z, uint32_t col) { addDeco(x - 0.15f, y - 0.08f, z - 0.15f, x + 0.15f, y, z + 0.15f, col, true); }
+static void lamp(float x, float y, float z, uint32_t col, float r = 0) {
+    if (r <= 0) r = std::max(8.0f, (y - G.groundY) * 1.3f + 4.0f);
+    addDeco(x - 0.15f, y - 0.08f, z - 0.15f, x + 0.15f, y, z + 0.15f, col, true);
+    LampL L; L.p = V3(x, y - 0.3f, z); L.col = col; L.r = r; G.lamps.push_back(L); }
 static void grassPatch(float x0, float z0, float x1, float z1, int count, uint32_t col) {
     Grass g; g.mn = V3(x0, 0, z0); g.mx = V3(x1, 1.2f, z1); g.col = col;
     for (int i = 0; i < count; i++) g.tufts.push_back(V3(frange(x0, x1), G.groundY, frange(z0, z1)));
@@ -6882,17 +6955,39 @@ static void wireFence(V3 a, V3 b) {
 // трава на открытой земле: куртины кустиков, не на дорогах, постройках и в воронках
 static void lawn(float density, uint32_t a, uint32_t b) { g_lawnDen = density; g_lawnA = a; g_lawnB = b; }
 static void scatterLawn() {
+    // ручные куртины травы: убрать кустики внутри построек и под крышами
+    for (Grass& g : G.grass) {
+        std::vector<V3> keep;
+        for (const V3& t : g.tufts) {
+            bool bad = false;
+            for (const Box& b : G.box) {
+                if (t.x < b.mn.x || t.x > b.mx.x || t.z < b.mn.z || t.z > b.mx.z || b.mx.y < G.groundY + 0.25f) continue;
+                if (b.mn.y < G.groundY + 0.3f ? (b.solid && b.vis) : (b.mn.y < G.groundY + 14 && (b.mx.x - b.mn.x) * (b.mx.z - b.mn.z) >= 2.0f)) { bad = true; break; }
+            }
+            if (!bad) keep.push_back(t);
+        }
+        g.tufts.swap(keep);
+    }
     G.lawn.clear(); g_gmask.clear(); g_gmW = g_gmH = 0; g_gmSerial++;
     if (g_lawnDen <= 0 || g_mmW <= 0 || !G.hasGround) return;
     // маска ковра: пусто на постройках, дорогах и в воронках; проплешины и сухие пятна по шуму
     g_gmW = g_mmW; g_gmH = g_mmH; g_gmX0 = g_mmX0; g_gmZ0 = g_mmZ0;
     g_gmask.assign((size_t)g_gmW * g_gmH * 4, 0);
+    // под крышей (туннели, залы, навесы, перекрытия) трава не растёт
+    std::vector<uint8_t> roof((size_t)g_gmW * g_gmH, 0);
+    for (const Box& b : G.box) {
+        if (b.mn.y < G.groundY + 1.2f || b.mn.y > G.groundY + 14 || (b.mx.x - b.mn.x) * (b.mx.z - b.mn.z) < 2.0f) continue;
+        int x0 = std::max(0, (int)floorf(b.mn.x - g_gmX0)), x1 = std::min(g_gmW - 1, (int)floorf(b.mx.x - g_gmX0));
+        int z0 = std::max(0, (int)floorf(b.mn.z - g_gmZ0)), z1 = std::min(g_gmH - 1, (int)floorf(b.mx.z - g_gmZ0));
+        for (int z = z0; z <= z1; z++) for (int x = x0; x <= x1; x++) roof[(size_t)z * g_gmW + x] = 1;
+    }
+    auto open = [&](int x, int z) { size_t i = (size_t)z * g_gmW + x; return g_mm[i] == 0 && !roof[i]; };
     for (int z = 0; z < g_gmH; z++)
         for (int x = 0; x < g_gmW; x++) {
             float wx = g_gmX0 + x + 0.5f, wz = g_gmZ0 + z + 0.5f;
             uint8_t* d = &g_gmask[((size_t)z * g_gmW + x) * 4];
             float dens = 0;
-            if (g_mm[(size_t)z * g_gmW + x] == 0) {
+            if (open(x, z)) {
                 float n = hnoise(wx / 13.0f, wz / 13.0f, 71) * 0.65f + hnoise(wx / 4.0f, wz / 4.0f, 72) * 0.35f;
                 dens = clampf(g_lawnDen * 2.3f * (0.5f + 0.9f * n), 0, 1);
                 for (const MGroup& g : G.mgrp) if (g.c.y < 2.0f && dist2D(V3(wx, 0, wz), g.c) < g.r * 0.6f) { dens = 0; break; }
@@ -6909,7 +7004,7 @@ static void scatterLawn() {
                     sum += src[((size_t)zz * g_gmW + xx) * 4]; n++;
                 }
                 uint8_t& d = g_gmask[((size_t)z * g_gmW + x) * 4];
-                d = g_mm[(size_t)z * g_gmW + x] == 0 ? (uint8_t)(sum / n) : 0;
+                d = open(x, z) ? (uint8_t)(sum / n) : 0;
             }
     }
     float area = (float)g_mmW * g_mmH;
@@ -6925,6 +7020,7 @@ static void scatterLawn() {
             float a = (q & 1023) / 1023.0f * 6.2832f, r = sqrtf(((q >> 10) & 1023) / 1023.0f) * cr;
             float x = cx + cosf(a) * r, z = cz + sinf(a) * r;
             if (mmAt(x, z) != 0) continue;
+            { int gx = (int)floorf(x - g_gmX0), gz = (int)floorf(z - g_gmZ0); if (gx < 0 || gz < 0 || gx >= g_gmW || gz >= g_gmH || roof[(size_t)gz * g_gmW + gx]) continue; }
             bool hole = false;
             for (const MGroup& g : G.mgrp) if (g.c.y < 2.0f && dist2D(V3(x, 0, z), g.c) < g.r * 0.75f) { hole = true; break; }
             if (hole) continue;
@@ -7194,7 +7290,7 @@ static void updateM1(float dt) {
     switch (G.stage) {
     case 0: if (countAlive(0) == 0 && G.stageT > 1) setStage(1); break;
     case 1:
-        if (G.iv[0] == 0 && G.P.stance == 1) { G.iv[0] = 1; say("Седой", "Теперь ляг."); setObjective(g_lastDev == 0 ? "Лягте: кнопка ЛЕЧЬ" : (g_lastDev == 1 ? "Лягте: удерживайте B" : "Лягте: клавиша Z"), V3(), false); }
+        if (G.iv[0] == 0 && G.P.stance == 1) { G.iv[0] = 1; say("Седой", "Теперь ляг."); setObjective(g_lastDev == 0 ? "Лягте: нажмите ПРИСЕД ещё раз" : (g_lastDev == 1 ? "Лягте: нажмите B ещё раз" : "Лягте: клавиша Z"), V3(), false); }
         else if (G.iv[0] == 1 && G.P.stance == 2) { G.iv[0] = 2; say("Седой", "Встать. Бегом к Доку, на гранатную позицию."); setObjective("Бегом к гранатной позиции", V3(26, 0, 6), true); }
         else if (G.iv[0] == 2 && dist2D(G.P.pos, V3(26, 0, 6)) < 3) setStage(2);
         break;
@@ -7256,7 +7352,7 @@ static void buildM2() {
     addBox(1, 0, 8, 3.5f, 1.0f, 9, RGBc(90, 95, 90), MT_METAL, true); addBox(-4.5f, 0, -27, -2, 1.0f, -26, RGBc(90, 95, 90), MT_METAL, true);
     lamp(-7.4f, 3, -20, RGBc(255, 220, 150)); lamp(7.4f, 3, 0, RGBc(255, 220, 150)); lamp(-7.4f, 3, 20, RGBc(255, 220, 150)); lamp(7.4f, 3, 35, RGBc(255, 220, 150));
     // трюм
-    uint32_t hold = RGBc(60, 60, 56);
+    uint32_t hold = RGBc(96, 98, 92);
     addBox(-7.8f, -5.3f, -10, 7.8f, -5, 32, hold, MT_METAL);
     addBox(-7.8f, -5, -10.3f, 7.8f, -0.3f, -10, hold, MT_METAL); addBox(-7.8f, -5, 32, 7.8f, -0.3f, 32.3f, hold, MT_METAL);
     for (int i = 0; i < 14; i++) addBox(-1.4f, -5, 12 + i * 0.5f, 1.4f, -(i + 1) * 0.357f, 12 + (i + 1) * 0.5f, RGBc(95, 95, 90), MT_METAL);
@@ -7266,8 +7362,12 @@ static void buildM2() {
     addDeco(-4.2f, -4.2f, 25.8f, -3.8f, -4.15f, 26.1f, RGBc(230, 230, 220), true);
     addBox(2.4f, -5, 25, 5.4f, -3.6f, 30.5f, RGBc(70, 80, 60), MT_WOOD);
     for (int k = 0; k < 4; k++) addDeco(2.35f, -4.6f, 25.4f + k * 1.3f, 2.4f, -4.0f, 26.0f + k * 1.3f, k & 1 ? RGBc(230, 230, 220) : RGBc(200, 40, 30), true);
-    lamp(0, -0.4f, -2, RGBc(255, 210, 140)); lamp(0, -0.4f, 9, RGBc(255, 210, 140)); lamp(-3, -0.4f, 25, RGBc(255, 210, 140));
+    for (float z : {-6.0f, 2.0f, 10.0f, 18.0f, 26.0f}) { lamp(-4.5f, -0.4f, z, RGBc(255, 205, 140), 9); lamp(4.5f, -0.4f, z + 4, RGBc(255, 205, 140), 9); }
+    lamp(0, -0.4f, 21, RGBc(255, 210, 150), 8);
+    lamp(0, -3.9f, 31.6f, RGBc(150, 36, 26), 3.5f);   // аварийный красный у дальней переборки
+    for (int i = 0; i < 14; i++) addDeco(-1.4f, -(i + 1) * 0.357f, 12 + (i + 1) * 0.5f - 0.06f, 1.4f, -(i + 1) * 0.357f + 0.02f, 12 + (i + 1) * 0.5f, RGBc(210, 170, 40));   // жёлтая окантовка ступеней
     G.waterMn = V3(-7.8f, 0, -10); G.waterMx = V3(7.8f, 0, 32);
+    G.holeX0 = -8.2f; G.holeX1 = 8.2f; G.holeZ0 = -41.2f; G.holeZ1 = 41.2f;   // море не рисуется внутри корпуса (виден трюм)
     bounds(-7.8f, -40.8f, 7.8f, 40.6f);
     int a = spawnAlly(V3(-2, 0, -26), "Седой", U_GROM, 0); G.act[a].hidden = true;
     a = spawnAlly(V3(2, 0, -26), "Док", U_DOC, 1); G.act[a].hidden = true;
@@ -8745,11 +8845,11 @@ static void missionUpdate(float dt) {
     switch (G.mission) { case 0: updateM1(dt); break; case 1: updateM2(dt); break; case 2: updateM3(dt); break; case 3: updateM4(dt); break; case 4: updateM5(dt); break; case 6: updateM7(dt); break; case 7: updateM8(dt); break; case 8: updateM9(dt); break; case 9: updateM10(dt); break; default: updateM6(dt); break; }
 }
 static void resetLevel() {
-    G.box.clear(); G.cover.clear(); G.grass.clear(); G.act.clear(); G.veh.clear(); G.gren.clear(); G.bul.clear();
+    G.box.clear(); G.lamps.clear(); G.cover.clear(); G.grass.clear(); G.act.clear(); G.veh.clear(); G.gren.clear(); G.bul.clear();
     G.prisms.clear(); G.mtri.clear(); G.mgrp.clear(); G.props.clear(); G.plumes.clear(); G.lawn.clear(); g_lawnDen = 0; G.war = false; G.warT = 3; g_levelSerial++; G.parts.clear(); G.smoke.clear(); G.tracers.clear(); G.hits.clear(); G.subs.clear(); G.story.clear();
     G.P = Player();
     for (int i = 0; i < 24; i++) { G.fl[i] = 0; G.iv[i] = 0; }
-    G.hasGround = true; G.groundY = 0; G.sea = false; G.rain = false; G.lightning = false; G.roll = 0; G.tilt = 0; G.waterOn = false; G.waterY = -100;
+    G.hasGround = true; G.groundY = 0; G.sea = false; G.rain = false; G.lightning = false; G.roll = 0; G.tilt = 0; G.waterOn = false; G.waterY = -100; G.holeX0 = G.holeX1 = G.holeZ0 = G.holeZ1 = 0;
     G.objective.clear(); G.objT = 0; G.wpOn = false; G.timerOn = false; G.progOn = false; G.progress = 0;
     G.stealth = false; G.detected = false; G.kills = G.shots = G.hitsN = G.heads = 0;
     G.callContact = G.callReload = G.callKill = G.callNade = 0;
@@ -8847,7 +8947,7 @@ enum TBtn { B_FIRE, B_ADS, B_RELOAD, B_STANCE, B_NADE, B_TAC, B_TACCYC, B_SWITCH
 struct TouchBtn { float x, y, r; const char* label; bool vis, held, pressed, released; float downT; };
 static TouchBtn g_btn[B_COUNT] = {
     {565, 250, 34, "ОГОНЬ", true, false, false, false, 0}, {600, 165, 24, "ПРИЦЕЛ", true, false, false, false, 0},
-    {488, 305, 22, "ПЕРЕЗ.", true, false, false, false, 0}, {596, 322, 22, "ПРИСЕД", true, false, false, false, 0},
+    {530, 328, 22, "ПЕРЕЗ.", true, false, false, false, 0}, {596, 322, 22, "ПРИСЕД", true, false, false, false, 0},
     {498, 238, 22, "ГРАН.", true, false, false, false, 0}, {452, 278, 20, "ТАКТ.", true, false, false, false, 0},
     {540, 330, 19, "ЛЕЧЬ", true, false, false, false, 0}, {528, 168, 22, "СМЕНА", true, false, false, false, 0},
     {540, 100, 19, "НАКЛ.Л", true, false, false, false, 0}, {600, 100, 19, "НАКЛ.П", true, false, false, false, 0},
@@ -8919,6 +9019,7 @@ static void touchFrame(float dt) {
         bool tk = G.P.tank;
         int hideInTank[5] = {B_RELOAD, B_STANCE, B_NADE, B_TAC, B_TACCYC};
         for (int b : hideInTank) g_btn[b].vis = !tk;
+        g_btn[B_TACCYC].vis = false;   // «ЛЕЧЬ» не нужна: дважды нажмите «ПРИСЕД»
         g_btn[B_LEANL].vis = g_btn[B_LEANR].vis = false;   // наклоны убраны с экрана (остались на клавиатуре и геймпаде)
         g_btn[B_SWITCH].label = tk ? "СНАРЯД" : "СМЕНА";
     }
@@ -8938,8 +9039,7 @@ static void touchFrame(float dt) {
     if (g_btn[B_ADS].pressed) g_touchAds = !g_touchAds;
     if (g_touchAds) IN.ads = true;
     if (g_btn[B_RELOAD].pressed) IN.reload = true;
-    if (g_btn[B_STANCE].released && g_btn[B_STANCE].downT < 0.4f) IN.stance = true;
-    if (g_btn[B_STANCE].held && g_btn[B_STANCE].downT >= 0.4f && g_btn[B_STANCE].downT - dt < 0.4f) IN.prone = true;
+    if (g_btn[B_STANCE].pressed) IN.stanceCycle = true;
     if (g_btn[B_NADE].held) IN.nadeHeld = true;
     if (g_btn[B_TAC].held) IN.tacHeld = true;
     if (g_btn[B_TACCYC].pressed) IN.prone = true;   // кнопка «ЛЕЧЬ» (вместо выбора тактической — та теперь меняется сама)
@@ -10271,7 +10371,7 @@ static void handleEvent(const SDL_Event& e) {
         }
         break;
     case SDL_CONTROLLERBUTTONUP:
-        if (e.cbutton.button == SDL_CONTROLLER_BUTTON_B && play) { if (!g_padProneSent && G.time - g_padBDown < 0.4f) IN.stance = true; g_padBDown = -1; }
+        if (e.cbutton.button == SDL_CONTROLLER_BUTTON_B && play) { if (!g_padProneSent) IN.stanceCycle = true; g_padBDown = -1; }
         break;
     case SDL_KEYDOWN:
         if (e.key.repeat) {
@@ -10393,7 +10493,7 @@ static void pollInput(float dt) {
             if (SDL_GameControllerGetButton(g_pad, SDL_CONTROLLER_BUTTON_A)) IN.useHeld = true;
             if (SDL_GameControllerGetButton(g_pad, SDL_CONTROLLER_BUTTON_LEFTSTICK) || SDL_GameControllerGetButton(g_pad, SDL_CONTROLLER_BUTTON_RIGHTSTICK)) IN.breath = true;
             if (g_padSprint) { if (-ly < 0.3f) g_padSprint = false; else IN.sprint = true; }
-            if (g_padBDown >= 0 && !g_padProneSent && G.time - g_padBDown >= 0.4f && SDL_GameControllerGetButton(g_pad, SDL_CONTROLLER_BUTTON_B)) { IN.prone = true; g_padProneSent = true; }
+            
         } else {
             g_navRepeat -= dt;
             if (fabsf(ly) > 0.6f && g_navRepeat <= 0) { if (ly < 0) IN.up = true; else IN.down = true; g_navRepeat = 0.22f; }
@@ -10485,6 +10585,7 @@ int main(int argc, char* argv[]) {
         }
         if (scr == SCR_CUTSCENE) { csUpdate(dt); scr = G.screen; }
         if (g_csJustDead) { g_csJustDead = false; g_selDead = 0; g_deadT = 0; g_csSeen = false; }
+        if ((scr == SCR_PLAY || scr == SCR_CUTSCENE) && G.screen != scr && G.screen != SCR_PAUSE) { IN = Input(); g_tapX = g_tapY = -1; }   // то же нажатие не жмёт кнопку на новом экране
         if (scr == SCR_CUTSCENE) { renderCutscene(dt); scene = true; csDrawUI(); }
         scr = G.screen;
         if (scr == SCR_PLAY || scr == SCR_PAUSE || scr == SCR_DEAD || scr == SCR_DEFUSE || (scr == SCR_SETTINGS && g_settingsReturn == SCR_PAUSE)) {
