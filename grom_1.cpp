@@ -4854,6 +4854,292 @@ static void drawGrenadeMesh(V3 c, const Basis& B, bool cam) {
     const RMesh& m = cam ? g_mGrH : g_mGr;
     drawMesh(m, 0, (int)(m.t.size() / 3), B, c, cam);
 }
+// =====================================================================
+//  ОРУЖИЕ: процедурные сеточные модели (ПП-9, СВК-338, дробовик, пистолет)
+//  Оси модели: x — вправо, y — вверх, z — вперёд (к дулу); начало — над рукоятью.
+// =====================================================================
+struct GunMesh { RMesh m; int body1 = 0, mag1 = 0, sup1 = 0, mov1 = 0; };   // диапазоны треугольников: корпус | магазин | глушитель | подвижная часть
+static GunMesh g_gun[W_COUNT];
+static bool g_gunReady = false;
+static const uint32_t GC_M = 0xFF50545Au, GC_D = 0xFF33363Au, GC_K = 0xFF16171Au, GC_P = 0xFF3E4145u, GC_O = 0xFF4A5038u, GC_W = 0xFF7A5634u, GC_W2 = 0xFF5E4026u,
+                      GC_L = 0xFF5A7E9Cu, GC_B = 0xFFC8A860u, GC_DOT = 0xFFD8D8D0u, GC_S = 0xFF6C7076u;
+
+struct GunB {
+    RMesh& m;
+    explicit GunB(RMesh& mm) : m(mm) {}
+    int tris() const { return (int)(m.t.size() / 3); }
+    int vtx(V3 p) { m.p.push_back(p); return (int)m.p.size() - 1; }
+    void tri(int a, int b, int c, uint32_t col) { m.t.push_back((uint16_t)a); m.t.push_back((uint16_t)b); m.t.push_back((uint16_t)c); m.col.push_back(col); }
+    void quad(V3 a, V3 b, V3 c, V3 d, uint32_t col) { int i = vtx(a); vtx(b); vtx(c); vtx(d); tri(i, i + 1, i + 2, col); tri(i, i + 2, i + 3, col); }
+    // цилиндр/конус вдоль оси ax; c — центр, hl — полудлина
+    void cyl(V3 c, int ax, float r0, float r1, float hl, int n, uint32_t col, bool cap0 = true, bool cap1 = true, uint32_t capCol = 0) {
+        V3 a = ax == 0 ? V3(1, 0, 0) : (ax == 1 ? V3(0, 1, 0) : V3(0, 0, 1));
+        V3 p = ax == 0 ? V3(0, 1, 0) : (ax == 1 ? V3(0, 0, 1) : V3(1, 0, 0));
+        V3 q = cross(a, p);
+        V3 A0 = c - a * hl, A1 = c + a * hl;
+        int base = (int)m.p.size();
+        for (int i = 0; i < n; i++) { float t = i * 2 * PI_F / n; V3 r = p * cosf(t) + q * sinf(t); vtx(A0 + r * r0); vtx(A1 + r * r1); }
+        for (int i = 0; i < n; i++) {
+            int j = (i + 1) % n, i0 = base + i * 2, i1 = i0 + 1, j0 = base + j * 2, j1 = j0 + 1;
+            tri(i0, j0, j1, col); tri(i0, j1, i1, col);
+        }
+        if (!capCol) capCol = col;
+        for (int e = 0; e < 2; e++) {
+            if (!(e ? cap1 : cap0)) continue;
+            float r = e ? r1 : r0; if (r < 1e-5f) continue;
+            V3 cc = e ? A1 : A0;
+            int cb = (int)m.p.size(); vtx(cc);
+            for (int i = 0; i < n; i++) { float t = i * 2 * PI_F / n; vtx(cc + (p * cosf(t) + q * sinf(t)) * r); }
+            for (int i = 0; i < n; i++) { int j = (i + 1) % n; if (e) tri(cb, cb + 1 + i, cb + 1 + j, capCol); else tri(cb, cb + 1 + j, cb + 1 + i, capCol); }
+        }
+    }
+    // выдавливание многоугольника (u,v): axis 0 — профиль (z,y) вдоль x; axis 2 — сечение (x,y) вдоль z. bev — фаска торцов
+    void ext(const float* uv, int n, int axis, float w0, float w1, uint32_t col, float bev = 0, uint32_t capCol = 0) {
+        std::vector<float> P(uv, uv + n * 2);
+        float area = 0;
+        for (int i = 0; i < n; i++) { int j = (i + 1) % n; area += P[i * 2] * P[j * 2 + 1] - P[j * 2] * P[i * 2 + 1]; }
+        if (area < 0) for (int i = 0; i < n / 2; i++) { std::swap(P[i * 2], P[(n - 1 - i) * 2]); std::swap(P[i * 2 + 1], P[(n - 1 - i) * 2 + 1]); }
+        V3 U = axis == 0 ? V3(0, 0, 1) : V3(1, 0, 0), V(0, 1, 0), W = cross(U, V);
+        if (!capCol) capCol = col;
+        // внутренний контур для фаски
+        std::vector<float> I = P;
+        if (bev > 0)
+            for (int i = 0; i < n; i++) {
+                int h = (i + n - 1) % n, j = (i + 1) % n;
+                float e1x = P[i * 2] - P[h * 2], e1y = P[i * 2 + 1] - P[h * 2 + 1], e2x = P[j * 2] - P[i * 2], e2y = P[j * 2 + 1] - P[i * 2 + 1];
+                float l1 = sqrtf(e1x * e1x + e1y * e1y) + 1e-9f, l2 = sqrtf(e2x * e2x + e2y * e2y) + 1e-9f;
+                float n1x = e1y / l1, n1y = -e1x / l1, n2x = e2y / l2, n2y = -e2x / l2;   // наружные нормали рёбер
+                float d = 1 + n1x * n2x + n1y * n2y; if (d < 0.35f) d = 0.35f;
+                I[i * 2] = P[i * 2] - (n1x + n2x) / d * bev; I[i * 2 + 1] = P[i * 2 + 1] - (n1y + n2y) / d * bev;
+            }
+        auto at = [&](const std::vector<float>& R, int i, float w) { return U * R[i * 2] + V * R[i * 2 + 1] + W * w; };
+        auto band = [&](const std::vector<float>& A, float wa, const std::vector<float>& B, float wb) {
+            for (int i = 0; i < n; i++) { int j = (i + 1) % n; quad(at(A, i, wa), at(A, j, wa), at(B, j, wb), at(B, i, wb), col); }
+        };
+        if (bev > 0 && w1 - w0 > 2 * bev) { band(I, w0, P, w0 + bev); band(P, w0 + bev, P, w1 - bev); band(P, w1 - bev, I, w1); }
+        else band(P, w0, P, w1);
+        // торцы: отсечение «ушей»
+        std::vector<int> id(n); for (int i = 0; i < n; i++) id[i] = i;
+        std::vector<int> T;
+        int guard = 0;
+        while (id.size() > 2 && guard++ < 400) {
+            bool cut = false;
+            for (size_t k = 0; k < id.size(); k++) {
+                int a = id[(k + id.size() - 1) % id.size()], b = id[k], c = id[(k + 1) % id.size()];
+                float ax = I[a * 2], ay = I[a * 2 + 1], bx_ = I[b * 2], by = I[b * 2 + 1], cx = I[c * 2], cy = I[c * 2 + 1];
+                if ((bx_ - ax) * (cy - ay) - (by - ay) * (cx - ax) <= 1e-10f) continue;
+                bool in = false;
+                for (int o : id) {
+                    if (o == a || o == b || o == c) continue;
+                    float px = I[o * 2], py = I[o * 2 + 1];
+                    float d1 = (bx_ - ax) * (py - ay) - (by - ay) * (px - ax), d2 = (cx - bx_) * (py - by) - (cy - by) * (px - bx_), d3 = (ax - cx) * (py - cy) - (ay - cy) * (px - cx);
+                    if (d1 > 0 && d2 > 0 && d3 > 0) { in = true; break; }
+                }
+                if (in) continue;
+                T.push_back(a); T.push_back(b); T.push_back(c);
+                id.erase(id.begin() + (long)k); cut = true; break;
+            }
+            if (!cut) break;
+        }
+        for (int e = 0; e < 2; e++) {
+            float w = e ? w1 : w0;
+            int base = (int)m.p.size();
+            for (int i = 0; i < n; i++) vtx(at(I, i, w));
+            for (size_t k = 0; k + 2 < T.size() + 0 && k < T.size(); k += 3) { if (e) tri(base + T[k], base + T[k + 1], base + T[k + 2], capCol); else tri(base + T[k], base + T[k + 2], base + T[k + 1], capCol); }
+        }
+    }
+    void box(V3 c, V3 h, uint32_t col) { float r[8] = {c.x - h.x, c.y - h.y, c.x + h.x, c.y - h.y, c.x + h.x, c.y + h.y, c.x - h.x, c.y + h.y}; ext(r, 4, 2, c.z - h.z, c.z + h.z, col); }
+    // брус вдоль z со срезанными рёбрами (восьмигранное сечение)
+    void beam(float cx, float cy, float hx, float hy, float ch, float z0, float z1, uint32_t col, float bev = 0) {
+        float r[16] = {cx - hx + ch, cy - hy, cx + hx - ch, cy - hy, cx + hx, cy - hy + ch, cx + hx, cy + hy - ch, cx + hx - ch, cy + hy, cx - hx + ch, cy + hy, cx - hx, cy + hy - ch, cx - hx, cy - hy + ch};
+        ext(r, 8, 2, z0, z1, col, bev);
+    }
+    // планка Пикатинни: основание и зубцы
+    void rail(float y, float z0, float z1, float hx) {
+        box(V3(0, y + 0.002f, (z0 + z1) * 0.5f), V3(hx, 0.002f, (z1 - z0) * 0.5f), GC_D);
+        for (float z = z0 + 0.004f; z < z1 - 0.004f; z += 0.012f) box(V3(0, y + 0.0055f, z + 0.003f), V3(hx + 0.001f, 0.0018f, 0.003f), GC_M);
+    }
+    // спусковая скоба и крючок
+    void guard(float z0, float z1, float yTop, float yBot, float hx) {
+        box(V3(0, yBot, (z0 + z1) * 0.5f), V3(hx, 0.0025f, (z1 - z0) * 0.5f), GC_D);
+        box(V3(0, (yTop + yBot) * 0.5f, z1), V3(hx, (yTop - yBot) * 0.5f, 0.0025f), GC_D);
+        float t[8] = {z0 + 0.016f, yTop, z0 + 0.024f, yTop, z0 + 0.03f, yBot + 0.012f, z0 + 0.024f, yBot + 0.01f};
+        ext(t, 4, 0, -0.003f, 0.003f, GC_K);
+    }
+};
+
+static void gunBuildSMG(GunMesh& g) {   // ПП-9
+    GunB b(g.m);
+    float rc[] = {-0.115f, -0.03f, -0.125f, 0.0f, -0.118f, 0.034f, -0.10f, 0.04f, 0.15f, 0.04f, 0.15f, -0.012f, 0.10f, -0.035f};
+    b.ext(rc, 7, 0, -0.024f, 0.024f, GC_M, 0.006f);                                    // ствольная коробка
+    b.rail(0.04f, -0.09f, 0.14f, 0.0105f);
+    b.beam(0, 0.004f, 0.027f, 0.03f, 0.011f, 0.15f, 0.235f, GC_P, 0.004f);             // цевьё
+    for (int s = -1; s <= 1; s += 2) for (int k = 0; k < 3; k++) b.box(V3(s * 0.0272f, 0.008f, 0.172f + k * 0.022f), V3(0.0006f, 0.006f, 0.007f), GC_K);   // окна охлаждения
+    b.box(V3(0, -0.028f, 0.19f), V3(0.012f, 0.003f, 0.04f), GC_D);                     // нижняя планка
+    float fg[] = {0.17f, -0.03f, 0.2f, -0.03f, 0.196f, -0.095f, 0.172f, -0.095f};
+    b.ext(fg, 4, 0, -0.013f, 0.013f, GC_D, 0.004f);                                    // передняя рукоять
+    b.cyl(V3(0, 0.005f, 0.25f), 2, 0.0085f, 0.0085f, 0.02f, 10, GC_D);                 // ствол
+    b.cyl(V3(0, 0.005f, 0.278f), 2, 0.0125f, 0.0125f, 0.012f, 10, GC_M, true, true, GC_K);   // дульный тормоз
+    for (int s = -1; s <= 1; s += 2) b.box(V3(s * 0.0126f, 0.005f, 0.278f), V3(0.0006f, 0.004f, 0.007f), GC_K);
+    // мушка в намушнике
+    b.box(V3(0, 0.038f, 0.222f), V3(0.012f, 0.004f, 0.008f), GC_D);
+    for (int s = -1; s <= 1; s += 2) b.box(V3(s * 0.0105f, 0.05f, 0.222f), V3(0.0018f, 0.009f, 0.006f), GC_D);
+    b.box(V3(0, 0.0485f, 0.222f), V3(0.0014f, 0.0065f, 0.0014f), GC_M);
+    // целик
+    b.box(V3(0, 0.047f, -0.1f), V3(0.014f, 0.003f, 0.009f), GC_D);
+    for (int s = -1; s <= 1; s += 2) b.box(V3(s * 0.0085f, 0.054f, -0.1f), V3(0.0028f, 0.005f, 0.004f), GC_D);
+    // рукоять, скоба
+    float gr[] = {-0.065f, -0.028f, -0.018f, -0.028f, -0.036f, -0.125f, -0.085f, -0.122f, -0.078f, -0.06f};
+    b.ext(gr, 5, 0, -0.0155f, 0.0155f, GC_P, 0.005f);
+    b.guard(-0.018f, 0.045f, -0.033f, -0.068f, 0.004f);
+    // приклад: две трубки и затыльник
+    for (float y : {0.018f, -0.016f}) b.cyl(V3(0, y, -0.2f), 2, 0.0055f, 0.0055f, 0.085f, 8, GC_D);
+    float bp[] = {-0.275f, 0.03f, -0.29f, 0.03f, -0.296f, -0.07f, -0.28f, -0.075f};
+    b.ext(bp, 4, 0, -0.014f, 0.014f, GC_P, 0.004f);
+    b.box(V3(0, 0.001f, -0.13f), V3(0.012f, 0.026f, 0.012f), GC_D);                    // шарнир приклада
+    // правая сторона: окно выброса, рукоять взвода, переводчик
+    b.box(V3(0.0243f, 0.018f, 0.045f), V3(0.0005f, 0.009f, 0.03f), GC_K);
+    b.cyl(V3(0.031f, 0.02f, 0.085f), 0, 0.004f, 0.004f, 0.008f, 8, GC_S);
+    b.box(V3(0.0246f, -0.012f, -0.03f), V3(0.0008f, 0.003f, 0.022f), GC_S);
+    b.box(V3(-0.0246f, -0.01f, 0.0f), V3(0.0008f, 0.012f, 0.05f), GC_D);               // накладка слева
+    g.body1 = b.tris();
+    float mg[] = {0.05f, -0.03f, 0.092f, -0.03f, 0.108f, -0.17f, 0.068f, -0.17f};
+    b.ext(mg, 4, 0, -0.012f, 0.012f, GC_D, 0.003f);                                    // магазин
+    b.box(V3(0, -0.172f, 0.088f), V3(0.0135f, 0.004f, 0.023f), GC_P);
+    for (int k = 0; k < 3; k++) b.box(V3(0, -0.07f - k * 0.03f, 0.063f + (0.07f + k * 0.03f - 0.03f) * 0.115f), V3(0.0126f, 0.002f, 0.002f), GC_K);
+    g.mag1 = b.tris();
+    b.cyl(V3(0, 0.005f, 0.36f), 2, 0.017f, 0.017f, 0.075f, 12, GC_D, true, true, GC_K);   // глушитель
+    b.cyl(V3(0, 0.005f, 0.29f), 2, 0.0185f, 0.0185f, 0.006f, 12, GC_M);
+    g.sup1 = b.tris(); g.mov1 = g.sup1;
+}
+
+static void gunBuildSniper(GunMesh& g) {   // СВК-338
+    GunB b(g.m);
+    float rc[] = {-0.15f, -0.035f, -0.15f, 0.028f, -0.12f, 0.036f, 0.2f, 0.036f, 0.2f, -0.02f, 0.12f, -0.04f, -0.1f, -0.04f};
+    b.ext(rc, 7, 0, -0.025f, 0.025f, GC_M, 0.007f);                                    // ствольная коробка
+    b.beam(0, -0.006f, 0.025f, 0.03f, 0.011f, 0.2f, 0.45f, GC_O, 0.005f);              // цевьё
+    for (int s = -1; s <= 1; s += 2) for (int k = 0; k < 5; k++) b.box(V3(s * 0.0252f, -0.004f, 0.235f + k * 0.045f), V3(0.0006f, 0.005f, 0.014f), GC_K);
+    b.rail(0.036f, -0.1f, 0.19f, 0.0105f);
+    b.cyl(V3(0, 0.01f, 0.575f), 2, 0.0135f, 0.0105f, 0.13f, 12, GC_D);                 // ствол
+    b.cyl(V3(0, 0.01f, 0.73f), 2, 0.0175f, 0.0175f, 0.03f, 12, GC_M, true, true, GC_K);   // ДТК
+    for (int s = -1; s <= 1; s += 2) for (int k = 0; k < 3; k++) b.box(V3(s * 0.0177f, 0.01f, 0.712f + k * 0.017f), V3(0.0006f, 0.008f, 0.004f), GC_K);
+    // прицел
+    float sy = 0.085f;
+    b.cyl(V3(0, sy, 0.0f), 2, 0.0145f, 0.0145f, 0.125f, 14, GC_D, false, false);
+    b.cyl(V3(0, sy, 0.15f), 2, 0.0145f, 0.026f, 0.025f, 14, GC_D, false, false);
+    b.cyl(V3(0, sy, 0.2f), 2, 0.026f, 0.026f, 0.025f, 14, GC_D, false, false);
+    b.cyl(V3(0, sy, 0.216f), 2, 0.0255f, 0.0255f, 0.002f, 14, GC_L, false, true, GC_L);   // линза объектива
+    b.cyl(V3(0, sy, -0.14f), 2, 0.021f, 0.0145f, 0.015f, 14, GC_D, false, false);
+    b.cyl(V3(0, sy, -0.18f), 2, 0.0215f, 0.021f, 0.025f, 14, GC_D, false, false);
+    b.cyl(V3(0, sy, -0.198f), 2, 0.021f, 0.021f, 0.002f, 14, GC_L, true, false, GC_L);       // линза окуляра
+    b.cyl(V3(0, sy + 0.024f, 0.01f), 1, 0.0105f, 0.0105f, 0.01f, 10, GC_M);            // барабанчик вертикали
+    b.cyl(V3(0.024f, sy, 0.01f), 0, 0.0105f, 0.0105f, 0.01f, 10, GC_M);                // барабанчик горизонтали
+    b.cyl(V3(-0.022f, sy, 0.01f), 0, 0.009f, 0.009f, 0.008f, 10, GC_M);
+    for (float z : {-0.065f, 0.08f}) {                                                  // кольца
+        b.cyl(V3(0, sy, z), 2, 0.0185f, 0.0185f, 0.009f, 12, GC_M);
+        b.box(V3(0, 0.055f, z), V3(0.009f, 0.013f, 0.009f), GC_M);
+    }
+    // затвор
+    b.cyl(V3(0.04f, 0.012f, -0.085f), 0, 0.0045f, 0.0045f, 0.017f, 8, GC_S);
+    b.cyl(V3(0.062f, 0.008f, -0.085f), 0, 0.0095f, 0.0095f, 0.007f, 10, GC_K);
+    b.box(V3(0.0252f, 0.012f, 0.03f), V3(0.0005f, 0.008f, 0.04f), GC_K);               // окно
+    // рукоять, скоба
+    float gr[] = {-0.1f, -0.036f, -0.05f, -0.036f, -0.07f, -0.135f, -0.118f, -0.13f, -0.112f, -0.07f};
+    b.ext(gr, 5, 0, -0.016f, 0.016f, GC_P, 0.005f);
+    b.guard(-0.05f, 0.012f, -0.04f, -0.075f, 0.004f);
+    // приклад с регулируемой щекой и затыльником
+    float st[] = {-0.15f, 0.026f, -0.2f, 0.02f, -0.43f, 0.02f, -0.43f, -0.115f, -0.4f, -0.118f, -0.3f, -0.07f, -0.24f, -0.05f, -0.15f, -0.035f};
+    b.ext(st, 8, 0, -0.021f, 0.021f, GC_O, 0.006f);
+    b.beam(0, 0.036f, 0.018f, 0.016f, 0.007f, -0.39f, -0.23f, GC_P, 0.004f);           // щека
+    float bp[] = {-0.43f, 0.03f, -0.452f, 0.026f, -0.452f, -0.118f, -0.43f, -0.122f};
+    b.ext(bp, 4, 0, -0.022f, 0.022f, GC_K, 0.005f);
+    b.box(V3(0, -0.02f, -0.3f), V3(0.0215f, 0.012f, 0.03f), GC_K);                     // вырез приклада (тёмная вставка)
+    // сошки (сложены)
+    b.box(V3(0, -0.04f, 0.4f), V3(0.016f, 0.008f, 0.018f), GC_D);
+    for (int s = -1; s <= 1; s += 2) { b.cyl(V3(s * 0.019f, -0.052f, 0.5f), 2, 0.005f, 0.005f, 0.105f, 8, GC_D); b.cyl(V3(s * 0.019f, -0.052f, 0.61f), 2, 0.0065f, 0.0065f, 0.008f, 8, GC_K); }
+    g.body1 = b.tris();
+    float mg[] = {0.0f, -0.038f, 0.085f, -0.038f, 0.09f, -0.105f, 0.008f, -0.11f};
+    b.ext(mg, 4, 0, -0.015f, 0.015f, GC_D, 0.004f);                                    // магазин
+    g.mag1 = b.tris();
+    b.cyl(V3(0, 0.01f, 0.86f), 2, 0.021f, 0.021f, 0.105f, 12, GC_D, true, true, GC_K);
+    g.sup1 = b.tris(); g.mov1 = g.sup1;
+}
+
+static void gunBuildShotgun(GunMesh& g) {
+    GunB b(g.m);
+    float rc[] = {-0.14f, -0.046f, -0.145f, 0.0f, -0.13f, 0.026f, -0.09f, 0.031f, 0.14f, 0.031f, 0.14f, -0.04f, 0.1f, -0.046f};
+    b.ext(rc, 7, 0, -0.0235f, 0.0235f, GC_M, 0.007f);                                  // ствольная коробка
+    b.cyl(V3(0, 0.015f, 0.4f), 2, 0.0125f, 0.0125f, 0.26f, 12, GC_D, true, true, GC_K);   // ствол
+    b.cyl(V3(0, -0.02f, 0.35f), 2, 0.012f, 0.012f, 0.21f, 12, GC_M);                   // подствольный магазин
+    b.cyl(V3(0, -0.02f, 0.567f), 2, 0.014f, 0.012f, 0.008f, 12, GC_S);
+    b.box(V3(0, -0.003f, 0.535f), V3(0.007f, 0.016f, 0.008f), GC_M);                   // хомут
+    b.cyl(V3(0, 0.0325f, 0.648f), 1, 0.0028f, 0.0028f, 0.0045f, 8, GC_B);              // латунная мушка
+    b.box(V3(0, 0.03f, 0.3f), V3(0.004f, 0.002f, 0.16f), GC_D);                        // прицельная планка
+    for (float z = 0.16f; z < 0.46f; z += 0.05f) b.box(V3(0, 0.027f, z), V3(0.003f, 0.003f, 0.004f), GC_D);
+    b.box(V3(0.0238f, 0.008f, 0.04f), V3(0.0005f, 0.011f, 0.04f), GC_K);               // окно выброса
+    b.box(V3(0.0238f, 0.008f, 0.02f), V3(0.001f, 0.008f, 0.018f), GC_S);               // затвор в окне
+    b.box(V3(0, -0.047f, 0.07f), V3(0.012f, 0.0008f, 0.045f), GC_K);                   // окно заряжания
+    b.guard(-0.06f, 0.0f, -0.046f, -0.08f, 0.004f);
+    // деревянный приклад с полупистолетной шейкой
+    float st[] = {-0.14f, 0.016f, -0.2f, 0.0f, -0.4f, -0.022f, -0.4f, -0.118f, -0.37f, -0.12f, -0.25f, -0.082f, -0.2f, -0.092f, -0.165f, -0.075f, -0.14f, -0.046f};
+    b.ext(st, 9, 0, -0.021f, 0.021f, GC_W, 0.008f, GC_W2);
+    float bp[] = {-0.4f, -0.018f, -0.418f, -0.022f, -0.418f, -0.118f, -0.4f, -0.122f};
+    b.ext(bp, 4, 0, -0.021f, 0.021f, GC_K, 0.005f);
+    g.body1 = b.tris(); g.mag1 = g.body1;
+    b.cyl(V3(0, 0.015f, 0.74f), 2, 0.02f, 0.02f, 0.085f, 12, GC_D, true, true, GC_K);
+    g.sup1 = b.tris();
+    // цевьё (подвижное): дерево с рёбрами
+    b.beam(0, -0.02f, 0.023f, 0.023f, 0.009f, 0.2f, 0.4f, GC_W, 0.006f);
+    for (int k = 0; k < 7; k++) b.beam(0, -0.02f, 0.0245f, 0.0245f, 0.0095f, 0.222f + k * 0.024f, 0.23f + k * 0.024f, GC_W2);
+    for (int s = -1; s <= 1; s += 2) b.box(V3(s * 0.0225f, -0.005f, 0.17f), V3(0.0012f, 0.003f, 0.05f), GC_S);   // тяги
+    g.mov1 = b.tris();
+}
+
+static void gunBuildPistol(GunMesh& g) {
+    GunB b(g.m);
+    b.beam(0, 0.029f, 0.0135f, 0.016f, 0.005f, -0.062f, 0.15f, GC_M, 0.003f);          // затвор
+    for (int s = -1; s <= 1; s += 2) for (int k = 0; k < 6; k++) b.box(V3(s * 0.0137f, 0.027f, -0.052f + k * 0.007f), V3(0.0005f, 0.011f, 0.0018f), GC_K);   // насечки
+    b.box(V3(0.008f, 0.0405f, 0.05f), V3(0.0062f, 0.005f, 0.02f), GC_K);               // окно выброса
+    b.box(V3(0.0045f, 0.04f, 0.05f), V3(0.005f, 0.0052f, 0.019f), GC_S);               // казённик ствола
+    b.cyl(V3(0, 0.03f, 0.153f), 2, 0.0062f, 0.0062f, 0.005f, 10, GC_S, false, true, GC_K);   // ствол
+    b.cyl(V3(0, 0.017f, 0.151f), 2, 0.0035f, 0.0035f, 0.002f, 8, GC_D);                // направляющая пружины
+    // рамка, рукоять
+    float fr[] = {-0.066f, 0.014f, 0.148f, 0.014f, 0.148f, -0.006f, 0.062f, -0.01f, 0.055f, -0.016f, -0.005f, -0.016f, -0.036f, -0.108f, -0.088f, -0.104f, -0.072f, -0.02f, -0.082f, 0.002f};
+    b.ext(fr, 10, 0, -0.0138f, 0.0138f, GC_P, 0.004f);
+    b.box(V3(0, -0.0085f, 0.105f), V3(0.0085f, 0.0022f, 0.035f), GC_D);                // планка под стволом
+    for (int s = -1; s <= 1; s += 2) for (int k = 0; k < 5; k++) b.box(V3(s * 0.0141f, -0.04f - k * 0.012f, -0.04f - k * 0.0042f), V3(0.0005f, 0.0035f, 0.017f), GC_K);   // накладки рукояти
+    b.guard(-0.008f, 0.058f, -0.016f, -0.05f, 0.0035f);
+    b.box(V3(-0.0143f, 0.006f, 0.02f), V3(0.0008f, 0.003f, 0.012f), GC_S);             // затворная задержка
+    float hm[] = {-0.066f, 0.02f, -0.076f, 0.034f, -0.07f, 0.04f, -0.062f, 0.03f};
+    b.ext(hm, 4, 0, -0.004f, 0.004f, GC_D);                                            // курок
+    // прицельные: мушка и целик с точками
+    b.box(V3(0, 0.047f, 0.138f), V3(0.0016f, 0.0025f, 0.004f), GC_D);
+    b.box(V3(0, 0.0475f, 0.1338f), V3(0.0009f, 0.0009f, 0.0003f), GC_DOT);
+    for (int s = -1; s <= 1; s += 2) { b.box(V3(s * 0.0062f, 0.0475f, -0.05f), V3(0.0032f, 0.003f, 0.004f), GC_D); b.box(V3(s * 0.006f, 0.0478f, -0.0542f), V3(0.0009f, 0.0009f, 0.0003f), GC_DOT); }
+    g.body1 = b.tris();
+    float mg[] = {-0.05f, -0.1f, -0.03f, -0.1f, -0.034f, -0.114f, -0.092f, -0.11f, -0.09f, -0.102f};
+    b.ext(mg, 5, 0, -0.0135f, 0.0135f, GC_D, 0.003f);                                  // пятка магазина
+    g.mag1 = b.tris();
+    b.cyl(V3(0, 0.03f, 0.225f), 2, 0.0145f, 0.0145f, 0.068f, 12, GC_D, true, true, GC_K);
+    g.sup1 = b.tris(); g.mov1 = g.sup1;
+}
+
+static void gunInit() {
+    if (g_gunReady) return;
+    g_gunReady = true;
+    gunBuildSMG(g_gun[W_SMG]); gunBuildSniper(g_gun[W_SNIPER]); gunBuildShotgun(g_gun[W_SHOTGUN]); gunBuildPistol(g_gun[W_PISTOL]);
+    for (int i = 0; i < W_COUNT; i++) if (!g_gun[i].m.t.empty()) meshFinish(g_gun[i].m, 0.8f);
+}
+// рисует модель: магазин можно скрыть (перезарядка), глушитель — по флагу, подвижная часть сдвигается на mov по оси ствола
+static void drawGun(int def, const Basis& B, V3 org, bool cam, bool magOut, bool silenced, float mov) {
+    gunInit();
+    const GunMesh& g = g_gun[def];
+    if (g.m.t.empty()) return;
+    drawMesh(g.m, 0, g.body1, B, org, cam);
+    if (!magOut && g.mag1 > g.body1) drawMesh(g.m, g.body1, g.mag1, B, org, cam);
+    if (silenced && g.sup1 > g.mag1) drawMesh(g.m, g.mag1, g.sup1, B, org, cam);
+    if (g.mov1 > g.sup1) drawMesh(g.m, g.sup1, g.mov1, B, org + B.f * mov, cam);
+}
 
 // =====================================================================
 //  ОТРИСОВКА СЦЕНЫ
@@ -4885,6 +5171,10 @@ static UniCol uniCol(int u) {
 // оружие в руках NPC (в базисе рук A от точки плеча sh)
 static void drawNpcGun(const Basis& A, V3 sh, int weapon, bool detail) {
     if (weapon == W_AR && (detail || g_useGL)) { drawNpcAk(A, sh); return; }
+    if (detail && weapon > W_AR && weapon < W_COUNT) {
+        drawGun(weapon, A, sh + bx(A, weapon == W_PISTOL ? V3(0.05f, 0.0f, 0.5f) : (weapon == W_SNIPER ? V3(0.08f, -0.01f, 0.36f) : V3(0.08f, -0.01f, 0.34f))), false, false, false, 0);
+        return;
+    }
     uint32_t m = RGBc(34, 34, 32), d = RGBc(22, 22, 22), f = RGBc(58, 62, 46), w = RGBc(110, 80, 52);
     if (weapon == W_PISTOL) {
         drawPart(A, sh, V3(0.05f, -0.02f, 0.5f), V3(0.018f, 0.02f, 0.09f), m);
@@ -5568,59 +5858,7 @@ static void drawDynamic() {
 }
 
 // ------------------------------------------------------------ оружие в руках
-struct VPart { float cx, cy, cz, hx, hy, hz; uint32_t col; };
-static const uint32_t VC_M = 0xFF2A2C2Au, VC_D = 0xFF1A1A1Au, VC_P = 0xFF3C4232u, VC_W = 0xFF6E5034u;
-static const uint32_t VC_R = 0xFF232522u;
-static const VPart kVAR[] = {
-    {0, 0, 0.05f, 0.03f, 0.045f, 0.16f, VC_M}, {0, -0.005f, 0.30f, 0.032f, 0.038f, 0.10f, VC_P}, {0, 0.005f, 0.47f, 0.012f, 0.012f, 0.09f, VC_D},
-    {0, 0.032f, 0.40f, 0.008f, 0.012f, 0.008f, VC_D}, {0, 0.05f, 0.40f, 0.003f, 0.012f, 0.003f, VC_D},
-    {0.0095f, 0.058f, -0.06f, 0.0025f, 0.007f, 0.006f, VC_D}, {-0.0095f, 0.058f, -0.06f, 0.0025f, 0.007f, 0.006f, VC_D}, {0, 0.048f, -0.06f, 0.014f, 0.004f, 0.01f, VC_D},
-    {0, -0.11f, 0.10f, 0.02f, 0.07f, 0.035f, VC_D}, {0, -0.02f, -0.22f, 0.025f, 0.05f, 0.12f, VC_P}, {0, -0.08f, -0.02f, 0.02f, 0.05f, 0.025f, VC_D},
-    {0, 0.044f, 0.12f, 0.012f, 0.004f, 0.12f, VC_R},          // планка
-    {0.034f, 0.012f, -0.0f, 0.006f, 0.008f, 0.018f, VC_D},    // рукоять затвора
-    {0, 0.005f, 0.575f, 0.017f, 0.017f, 0.028f, VC_D},        // ДТК
-    {0, -0.05f, 0.03f, 0.004f, 0.012f, 0.035f, VC_D},         // спусковая скоба
-    {0.033f, -0.005f, 0.30f, 0.003f, 0.012f, 0.08f, VC_R}, {-0.033f, -0.005f, 0.30f, 0.003f, 0.012f, 0.08f, VC_R}, // прорези цевья
-    {0, -0.05f, 0.33f, 0.014f, 0.035f, 0.016f, VC_D},         // тактическая рукоять
-    {0, 0.02f, -0.21f, 0.022f, 0.012f, 0.08f, VC_D},          // щека приклада
-};
-static const VPart kVSMG[] = {
-    {0, 0, 0.02f, 0.028f, 0.04f, 0.13f, VC_M}, {0, 0.0f, 0.2f, 0.012f, 0.012f, 0.07f, VC_D}, {0, -0.1f, 0.07f, 0.018f, 0.07f, 0.024f, VC_D},
-    {0, -0.02f, -0.18f, 0.012f, 0.03f, 0.1f, VC_D}, {0, -0.075f, -0.04f, 0.018f, 0.045f, 0.022f, VC_D},
-    {0, 0.045f, 0.13f, 0.003f, 0.01f, 0.003f, VC_D}, {0.009f, 0.051f, -0.07f, 0.0025f, 0.006f, 0.005f, VC_D}, {-0.009f, 0.051f, -0.07f, 0.0025f, 0.006f, 0.005f, VC_D},
-    {0, 0.04f, 0.03f, 0.01f, 0.004f, 0.09f, VC_R},            // планка
-    {0, -0.05f, 0.17f, 0.014f, 0.03f, 0.016f, VC_D},          // передняя рукоять
-    {0, -0.005f, 0.13f, 0.03f, 0.03f, 0.05f, VC_P},           // цевьё
-    {0.03f, 0.015f, 0.05f, 0.005f, 0.006f, 0.014f, VC_D},     // взвод
-    {0, -0.06f, -0.27f, 0.012f, 0.035f, 0.012f, VC_D},        // затыльник
-};
-static const VPart kVSN[] = {
-    {0, 0, 0.0f, 0.03f, 0.04f, 0.18f, VC_M}, {0, 0.01f, 0.46f, 0.013f, 0.013f, 0.28f, VC_D}, {0, 0.085f, 0.0f, 0.025f, 0.025f, 0.16f, VC_D},
-    {0, 0.085f, 0.17f, 0.032f, 0.032f, 0.02f, VC_D}, {0, 0.05f, 0.0f, 0.01f, 0.02f, 0.05f, VC_D},
-    {0, -0.02f, -0.3f, 0.03f, 0.06f, 0.14f, VC_W}, {0.04f, 0.01f, -0.08f, 0.02f, 0.006f, 0.006f, VC_D}, {0, -0.05f, 0.18f, 0.03f, 0.03f, 0.12f, VC_W},
-    {0, 0.085f, -0.17f, 0.03f, 0.03f, 0.02f, VC_D},           // окуляр
-    {0, 0.115f, 0.0f, 0.01f, 0.008f, 0.012f, VC_M}, {0.03f, 0.085f, 0.0f, 0.008f, 0.01f, 0.012f, VC_M}, // барабаны
-    {0.015f, -0.04f, 0.5f, 0.005f, 0.005f, 0.12f, VC_D}, {-0.015f, -0.04f, 0.5f, 0.005f, 0.005f, 0.12f, VC_D}, // сошки
-    {0, 0.025f, -0.28f, 0.024f, 0.012f, 0.07f, VC_W},         // щека
-    {0, 0.01f, 0.75f, 0.02f, 0.02f, 0.03f, VC_D},             // ДТК
-    {0, -0.065f, -0.02f, 0.012f, 0.03f, 0.02f, VC_D},         // магазин
-};
-static const VPart kVSG[] = {
-    {0, 0, 0.0f, 0.03f, 0.045f, 0.14f, VC_M}, {0, 0.015f, 0.38f, 0.014f, 0.014f, 0.26f, VC_D}, {0, -0.02f, 0.32f, 0.012f, 0.012f, 0.2f, VC_D},
-    {0, 0.033f, 0.63f, 0.004f, 0.004f, 0.004f, 0xFFB0B0A0u}, {0, -0.02f, -0.25f, 0.028f, 0.055f, 0.13f, VC_W}, {0, -0.075f, -0.03f, 0.018f, 0.045f, 0.022f, VC_D},
-    {0, 0.032f, 0.38f, 0.017f, 0.004f, 0.22f, VC_R},          // кожух
-    {0.031f, 0.01f, 0.03f, 0.002f, 0.02f, 0.04f, VC_D},       // окно выброса
-    {0, -0.05f, 0.02f, 0.004f, 0.012f, 0.035f, VC_D},         // скоба
-    {0, -0.075f, -0.37f, 0.03f, 0.065f, 0.012f, VC_D},        // затыльник
-};
-static const VPart kVPI[] = {
-    {0, 0.02f, 0.05f, 0.015f, 0.018f, 0.09f, VC_M}, {0, -0.005f, 0.04f, 0.014f, 0.012f, 0.08f, VC_D}, {0, -0.06f, -0.02f, 0.016f, 0.05f, 0.022f, VC_D},
-    {0, 0.042f, 0.13f, 0.003f, 0.007f, 0.003f, VC_D}, {0.008f, 0.042f, -0.03f, 0.003f, 0.007f, 0.004f, VC_D}, {-0.008f, 0.042f, -0.03f, 0.003f, 0.007f, 0.004f, VC_D},
-    {0, 0.035f, -0.04f, 0.005f, 0.008f, 0.006f, VC_D},        // курок
-    {0, -0.03f, 0.04f, 0.004f, 0.01f, 0.03f, VC_D},           // скоба
-    {0.016f, 0.02f, -0.01f, 0.002f, 0.012f, 0.025f, VC_R},    // насечки затвора
-    {0, -0.105f, -0.025f, 0.017f, 0.006f, 0.024f, VC_R},      // пятка магазина
-};
+static const uint32_t VC_D = 0xFF1A1A1Au;
 static const float kAkVmZ = 0.22f;   // сдвиг АК-12 вперёд: рукоять под правой кистью
 static float sightY(int def) {
     switch (def) { case W_AR: return g_akSightY; case W_SMG: return 0.055f; case W_SNIPER: return 0.085f; case W_SHOTGUN: return 0.037f; default: return 0.049f; }
@@ -5629,6 +5867,7 @@ static float muzzleZ(int def) {
     switch (def) { case W_AR: return g_akMuzzleZ + kAkVmZ; case W_SMG: return 0.29f; case W_SNIPER: return 0.76f; case W_SHOTGUN: return 0.66f; default: return 0.16f; }
 }
 static float g_vmLagX = 0, g_vmLagY = 0;
+static bool g_vmDbg = false; static float g_vmDbgYaw = 0, g_vmDbgPitch = 0; static V3 g_vmDbgPos;   // поза для снимков моделей
 static void drawViewModel(float dt) {
     Player& P = G.P;
     std::fill(g_zb.begin(), g_zb.end(), 0.0f);
@@ -5661,30 +5900,16 @@ static void drawViewModel(float dt) {
         if (P.sprint) { pos.x -= 0.04f; pos.y -= 0.03f; yawO += 0.6f; rollO += 0.35f; }
         if (P.throwAnim > 0 || P.cookType >= 0) { pos.y -= 0.12f; pitO -= 0.3f; }
         Basis B = basisYPR(yawO, pitO, rollO);
-        const VPart* parts; int n;
-        switch (W.def) {
-        case W_AR: parts = kVAR; n = (int)(sizeof(kVAR) / sizeof(VPart)); break;
-        case W_SMG: parts = kVSMG; n = (int)(sizeof(kVSMG) / sizeof(VPart)); break;
-        case W_SNIPER: parts = kVSN; n = (int)(sizeof(kVSN) / sizeof(VPart)); break;
-        case W_SHOTGUN: parts = kVSG; n = (int)(sizeof(kVSG) / sizeof(VPart)); break;
-        default: parts = kVPI; n = (int)(sizeof(kVPI) / sizeof(VPart)); break;
-        }
+        if (g_vmDbg) { B = basisYPR(g_vmDbgYaw, g_vmDbgPitch, 0); pos = g_vmDbgPos; }
         bool reloadMagOut = W.reloadT > 0 && !WD[W.def].shellReload && (1 - W.reloadT / std::max(0.01f, W.reloadDur)) > 0.2f && (1 - W.reloadT / std::max(0.01f, W.reloadDur)) < 0.55f;
         if (W.def == W_AR) {
             meshInit();
             drawMesh(g_mAk, 0, (int)(g_mAk.t.size() / 3), B, pos + bx(B, V3(0, 0, kAkVmZ)), true, 1.0f, reloadMagOut ? g_akMag0 : -1, reloadMagOut ? g_akMag1 : -1);
-            n = 0;
+            if (W.silenced) drawOBB(pos + bx(B, V3(0, -0.017f, muzzleZ(W.def) + 0.075f)), B.r, B.u, B.f, V3(0.016f, 0.016f, 0.075f), VC_D, true);
+        } else {
+            float pump = (W.def == W_SHOTGUN && W.boltT > 0) ? -0.07f * sinf(clampf(W.boltT / 0.75f, 0, 1) * PI_F) : 0.0f;
+            drawGun(W.def, B, pos, true, reloadMagOut, W.silenced, pump);
         }
-        for (int i = 0; i < n; i++) {
-            const VPart& q = parts[i];
-            if (reloadMagOut && q.cy < -0.09f && q.hy > 0.06f) continue;
-            V3 lc(q.cx, q.cy, q.cz);
-            if (W.def == W_SHOTGUN && i == 2 && W.boltT > 0) lc.z -= 0.06f * sinf(clampf(W.boltT / 0.75f, 0, 1) * PI_F);
-            uint32_t col = shadeC(q.col, 1.0f);
-            drawOBB(pos + bx(B, lc), B.r, B.u, B.f, V3(q.hx, q.hy, q.hz), col, true);
-        }
-        if (W.silenced && W.def == W_AR) drawOBB(pos + bx(B, V3(0, -0.017f, muzzleZ(W.def) + 0.075f)), B.r, B.u, B.f, V3(0.016f, 0.016f, 0.075f), VC_D, true);
-        else if (W.silenced) drawOBB(pos + bx(B, V3(0, 0.02f, 0.22f)), B.r, B.u, B.f, V3(0.014f, 0.014f, 0.07f), VC_D, true);
         uint32_t glove = RGBc(45, 45, 40), sleeve = P.ghillie ? RGBc(80, 95, 55) : RGBc(85, 92, 62);
         if (W.def == W_PISTOL) {
             drawOBB(pos + bx(B, V3(0, -0.07f, -0.03f)), B.r, B.u, B.f, V3(0.032f, 0.035f, 0.035f), glove, true);
@@ -5693,13 +5918,15 @@ static void drawViewModel(float dt) {
         } else {
             drawOBB(pos + bx(B, V3(0, -0.075f, -0.03f)), B.r, B.u, B.f, V3(0.034f, 0.04f, 0.04f), glove, true);
             drawOBB(pos + bx(B, V3(0.06f, -0.13f, -0.15f)), B.r, B.u, B.f, V3(0.04f, 0.04f, 0.12f), sleeve, true);
-            float lz = (reloadMagOut ? 0.1f : 0.28f);
-            if (W.def == W_SNIPER) lz = 0.2f;
-            drawOBB(pos + bx(B, V3(0, -0.05f, lz)), B.r, B.u, B.f, V3(0.035f, 0.035f, 0.04f), glove, true);
+            float lz = (reloadMagOut ? 0.1f : 0.28f), ly = -0.05f;
+            if (W.def == W_SNIPER) { lz = 0.3f; ly = -0.065f; }
+            else if (W.def == W_SMG) { lz = reloadMagOut ? 0.08f : 0.186f; ly = -0.105f; }
+            else if (W.def == W_SHOTGUN) { lz = 0.3f + ((W.boltT > 0) ? -0.07f * sinf(clampf(W.boltT / 0.75f, 0, 1) * PI_F) : 0.0f); ly = -0.07f; }
+            drawOBB(pos + bx(B, V3(0, ly, lz)), B.r, B.u, B.f, V3(0.035f, 0.035f, 0.04f), glove, true);
             drawOBB(pos + bx(B, V3(-0.08f, -0.11f, lz - 0.1f)), B.r, B.u, B.f, V3(0.04f, 0.04f, 0.13f), sleeve, true);
         }
         if (P.muzzle > 0 && !W.silenced) {
-            V3 m = pos + bx(B, V3(0, W.def == W_AR ? -0.017f : 0.005f, muzzleZ(W.def) + 0.03f));
+            V3 m = pos + bx(B, V3(0, W.def == W_AR ? -0.017f : (W.def == W_SHOTGUN ? 0.015f : (W.def == W_PISTOL ? 0.03f : (W.def == W_SNIPER ? 0.01f : 0.005f))), muzzleZ(W.def) + 0.03f));
             float s = 0.05f + frand() * 0.03f;
             V3 a[3] = {m + B.r * s, m - B.r * s * 0.5f + B.u * s, m - B.r * s * 0.5f - B.u * s};
             V3 b[3] = {m - B.r * s, m + B.r * s * 0.5f + B.u * s, m + B.r * s * 0.5f - B.u * s};
@@ -5859,7 +6086,7 @@ precision mediump float;
 #endif
 #endif
 uniform vec3 uSun; uniform vec3 uSunCol; uniform vec3 uSkyAmb; uniform vec3 uGndAmb;
-uniform vec4 uLP[6]; uniform vec4 uLC[6];
+uniform vec4 uLP[8]; uniform vec4 uLC[8];
 uniform vec3 uFog; uniform vec2 uFogR; uniform vec3 uCam; uniform float uTime; uniform float uShadowOn; uniform float uShadowTexel;
 uniform sampler2D uNoise; uniform sampler2D uShadow; uniform sampler2D uAtlas; uniform sampler2D uGMask;
 uniform vec4 uGRect; uniform vec3 uGrassA; uniform vec3 uGrassB;
@@ -5983,7 +6210,7 @@ void main() {
         vec3 v = normalize(uCam - vW);
         float spec = pow(max(dot(reflect(-uSun, n), v), 0.0), 24.0) * 0.12 * sh;
         vec3 lit = vec3(0.0);
-        for (int i = 0; i < 6; i++) {   // фонари
+        for (int i = 0; i < 8; i++) {   // фонари
             vec3 L = uLP[i].xyz - vW; float d2 = dot(L, L), r = uLP[i].w;
             float att = max(1.0 - d2 / (r * r + 0.001), 0.0); att *= att;
             lit += uLC[i].rgb * att * (0.25 + 0.75 * max(dot(n, L * inversesqrt(d2 + 0.0001)), 0.0));
@@ -6438,22 +6665,23 @@ static void glSetMain(const float* vp) {
     GLF.Uniform3f(P.uCam, g_cam.pos.x, g_cam.pos.y, g_cam.pos.z);
     GLF.Uniform1f(P.uTime, G.time);
     if (P.uLP >= 0 && GLF.Uniform4fv) {   // 6 ближайших к камере фонарей
-        float lp[24] = {0}, lc[24] = {0};
-        int pick[6] = {-1, -1, -1, -1, -1, -1}; float pd[6] = {1e9f, 1e9f, 1e9f, 1e9f, 1e9f, 1e9f};
+        float lp[32] = {0}, lc[32] = {0};
+        int pick[8]; float pd[8]; for (int k = 0; k < 8; k++) { pick[k] = -1; pd[k] = 1e9f; }
+        V3 focus = g_cam.pos + g_cam.F * 7.0f;   // освещаем то, на что смотрим (трюм через люк), а не только то, что рядом
         for (int i = 0; i < (int)G.lamps.size(); i++) {
-            float d = len(G.lamps[i].p - g_cam.pos) - G.lamps[i].r;
+            float d = len(G.lamps[i].p - focus) - G.lamps[i].r;
             if (d > 45) continue;
-            for (int k = 0; k < 6; k++) if (d < pd[k]) { for (int j = 5; j > k; j--) { pd[j] = pd[j - 1]; pick[j] = pick[j - 1]; } pd[k] = d; pick[k] = i; break; }
+            for (int k = 0; k < 8; k++) if (d < pd[k]) { for (int j = 7; j > k; j--) { pd[j] = pd[j - 1]; pick[j] = pick[j - 1]; } pd[k] = d; pick[k] = i; break; }
         }
         float night = clampf(1.25f - g_env.sunI * 0.9f, 0.35f, 1.15f);
-        for (int k = 0; k < 6; k++) {
+        for (int k = 0; k < 8; k++) {
             if (pick[k] < 0) { lp[k * 4 + 3] = 0.01f; continue; }
             const LampL& L = G.lamps[pick[k]];
             float c[3]; cv3(L.col, c);
             lp[k * 4] = L.p.x; lp[k * 4 + 1] = L.p.y; lp[k * 4 + 2] = L.p.z; lp[k * 4 + 3] = L.r;
             for (int j = 0; j < 3; j++) lc[k * 4 + j] = c[j] * 1.6f * night;
         }
-        GLF.Uniform4fv(P.uLP, 6, lp); GLF.Uniform4fv(P.uLC, 6, lc);
+        GLF.Uniform4fv(P.uLP, 8, lp); GLF.Uniform4fv(P.uLC, 8, lc);
     }
     if (P.uWind >= 0) GLF.Uniform4f(P.uWind, fmodf(G.time, 1000.0f), G.groundY, g_cam.pos.x, g_cam.pos.z);
     GLF.Uniform1f(P.uShadowOn, g_glShadows ? 1.0f : 0.0f);
@@ -7376,30 +7604,45 @@ static void buildM2() {
     G.P.nade[0] = 2; G.P.nade[1] = 2; G.P.nade[2] = 1;
     g_amb.rain = 0.9f; g_amb.wind = 0.45f; g_amb.echoAmt = 0.12f;
 }
+// следующая волна расставляется заранее (стоит на постах), чтобы враги не возникали на глазах у игрока
+static bool waveExists(int tag) { for (const auto& a : G.act) if (a.kind == AK_SOLDIER && a.team == 1 && a.tag == tag) return true; return false; }
+static void waveRelease(int tag, float maxY = 1e9f) { for (auto& a : G.act) if (a.kind == AK_SOLDIER && a.team == 1 && a.tag == tag && a.pos.y < maxY) a.stationary = false; }
+static void deckGuards() {
+    if (waveExists(1)) return;
+    V3 p[8] = {V3(-3, 0, -16), V3(3, 0, -10), V3(-6, 0, -1), V3(2, 0, 6), V3(-3.5f, 0, 10), V3(5, 0, 16), V3(-4, 0, 21), V3(2, 0, 35)};
+    for (int i = 0; i < 8; i++) { int e = spawnEnemy(p[i], U_SYND, i % 3 == 1 ? 1 : 0, false, 1); G.act[e].stationary = true; }
+    int e = spawnEnemy(V3(-5.5f, 2.6f, 26), U_SYND, 0, false, 1); G.act[e].stationary = true;
+}
+// охрана трюма стоит на постах с самого начала спуска (видна через люк), а не возникает перед игроком
+static void holdGuards() {
+    if (waveExists(3)) return;
+    V3 p[6] = {V3(-3, -5, 3), V3(3, -5, 4.5f), V3(0, -5, 23), V3(-5.5f, -5, 17), V3(5.5f, -5, 23.5f), V3(-2, -5, 29)};
+    for (int i = 0; i < 6; i++) { int e = spawnEnemy(p[i], U_SYND, i & 1, false, 3); G.act[e].stationary = true; G.act[e].yaw = yawTo(p[i], V3(0, -5, 15)); }
+}
 static void stageM2(int s) {
     switch (s) {
     case 0:
         showStory({"02:40. Каральское море.", "Спуск по тросам."}, 3.0f, -1, false, 0);
         say("Седой", "Тросы пошли. Без лишнего шума, пока можно.");
+        deckGuards();
         break;
     case 1: {
         for (auto& a : G.act) if (a.kind == AK_ALLY) a.hidden = false;
         placeAllies();
         setObjective("Зачистите палубу", V3(0, 0, 10), false);
-        V3 p[8] = {V3(-3, 0, -16), V3(3, 0, -10), V3(-6, 0, -1), V3(2, 0, 6), V3(-3.5f, 0, 10), V3(5, 0, 16), V3(-4, 0, 21), V3(2, 0, 35)};
-        for (int i = 0; i < 8; i++) spawnEnemy(p[i], U_SYND, i % 3 == 1 ? 1 : 0, false, 1);
-        int e = spawnEnemy(V3(-5.5f, 2.6f, 26), U_SYND, 0, false, 1); G.act[e].stationary = true;
+        deckGuards(); waveRelease(1, 1.0f);
         say("Док", "Ну и погодка. Самое то для круиза.");
     } break;
     case 2:
         checkpoint();
         say("Седой", "Палуба чиста. Спускаемся в трюм. Я первый, Кот — за мной.");
         setObjective("Спуститесь в трюм", V3(0, 0, 12.5f), true);
+        holdGuards();
         break;
     case 3: {
         setObjective("Зачистите трюм", V3(0, -5, 20), false);
-        V3 p[6] = {V3(-3, -5, 3), V3(3, -5, 4.5f), V3(0, -5, 23), V3(-5.5f, -5, 17), V3(5.5f, -5, 23.5f), V3(-2, -5, 29)};
-        for (int i = 0; i < 6; i++) spawnEnemy(p[i], U_SYND, i & 1, true, 3);
+        holdGuards();
+        for (auto& a : G.act) if (a.kind == AK_SOLDIER && a.tag == 3 && a.alive) { a.alerted = true; a.stationary = false; a.lastKnown = G.P.pos; a.lastSeen = 5.0f; }
         G.iv[0] = 0;
     } break;
     case 4: {
@@ -7527,6 +7770,11 @@ static void buildM3() {
     G.P.nade[0] = 3; G.P.nade[1] = 2; G.P.nade[2] = 2;
     g_amb.wind = 0.1f; g_amb.echoAmt = 0.5f;
 }
+static void plazaGuards() {
+    if (waveExists(1)) return;
+    V3 p[8] = {V3(-14, 0, 65), V3(-6, 0, 65.5f), V3(6, 0, 73), V3(14, 0, 73), V3(-6, 0, 81), V3(6, 0, 81), V3(-15, 0, 86), V3(15, 0, 87)};
+    for (int i = 0; i < 8; i++) { int e = spawnEnemy(p[i], U_MILITIA, i % 3 == 2 ? 1 : 0, false, 1); G.act[e].stationary = true; }
+}
 static void stageM3(int s) {
     switch (s) {
     case 0: {
@@ -7537,13 +7785,13 @@ static void stageM3(int s) {
         for (auto& p : bal) { int e = spawnEnemy(p, U_MILITIA, 0, false, 0); G.act[e].stationary = true; G.act[e].yaw = PI_F; }
         V3 st[4] = {V3(-1.5f, 0, 21.5f), V3(-2.5f, 0, 31.5f), V3(2.4f, 0, 43.5f), V3(-3, 0, 48)};
         for (int i = 0; i < 4; i++) spawnEnemy(st[i], U_MILITIA, i & 1, false, 0);
+        plazaGuards();
     } break;
     case 1: {
         checkpoint();
         say("Сова", "Площадь. Вижу движение у прилавков.");
         setObjective("Зачистите площадь и найдите связного", V3(0, 0, 74), true);
-        V3 p[8] = {V3(-14, 0, 65), V3(-6, 0, 65.5f), V3(6, 0, 73), V3(14, 0, 73), V3(-6, 0, 81), V3(6, 0, 81), V3(-15, 0, 86), V3(15, 0, 87)};
-        for (int i = 0; i < 8; i++) spawnEnemy(p[i], U_MILITIA, i % 3 == 2 ? 1 : 0, false, 1);
+        plazaGuards(); waveRelease(1);
         Actor c; c.kind = AK_CONTACT; c.team = 1; c.uni = U_CIV; c.pos = V3(8, 0, 89); c.hp = 60; c.maxhp = 60; c.name = "Связной"; c.yaw = PI_F;
         c.path = {V3(16, 0, 82), V3(24, 0, 73), V3(33, 0, 73), V3(40, 0, 74), V3(42, 0, 81)};
         G.act.push_back(c); G.iv[5] = (int)G.act.size() - 1;
@@ -7995,6 +8243,11 @@ static void buildM6() {
     G.P.nade[0] = 3; G.P.nade[1] = 2; G.P.nade[2] = 1;
     g_amb.wind = 0.35f; g_amb.echoAmt = 0.55f;
 }
+static void tunnelGuards() {
+    if (waveExists(1)) return;
+    V3 p[6] = {V3(-3, 0, 51.5f), V3(3, 0, 57.5f), V3(3, 0, 68), V3(-3.5f, 0, 73.6f), V3(2.6f, 0, 86), V3(-3, 0, 92)};
+    for (int i = 0; i < 6; i++) { int e = spawnEnemy(p[i], U_SYND, i & 1, false, 1); G.act[e].stationary = true; }
+}
 static void stageM6(int s) {
     switch (s) {
     case 0: {
@@ -8002,6 +8255,7 @@ static void stageM6(int s) {
         setObjective("Прорвитесь через КПП", V3(0, 0, 40), true);
         V3 p[7] = {V3(-4, 0, 15.6f), V3(4, 0, 27.6f), V3(-13, 0, 25.8f), V3(11, 0, 29.8f), V3(8, 0, 20), V3(13, 0, 11.4f), V3(-11, 0, 11.8f)};
         for (int i = 0; i < 7; i++) spawnEnemy(p[i], U_SYND, i % 3 == 2, false, 0);
+        tunnelGuards();
         int j = spawnVeh(VK_JEEP, V3(0, 0, 30), 0, 1); G.veh[j].path = {V3(0, 0, 60), V3(0, 0, 100), V3(0, 0, 130), V3(0, 0, 159), V3(0, 0, 250)}; G.veh[j].speed = 9; G.veh[j].hp = 1e9f; G.iv[4] = j;
         G.iv[0] = 0;
     } break;
@@ -8009,8 +8263,7 @@ static void stageM6(int s) {
         checkpoint();
         setObjective("Пройдите туннель", V3(0, 0, 104), true);
         say("Седой", "Туннель. Держимся стен, работаем парами.");
-        V3 p[6] = {V3(-3, 0, 51.5f), V3(3, 0, 57.5f), V3(3, 0, 68), V3(-3.5f, 0, 73.6f), V3(0, 0, 86), V3(-3, 0, 92)};
-        for (int i = 0; i < 6; i++) spawnEnemy(p[i], U_SYND, i & 1, false, 1);
+        tunnelGuards(); waveRelease(1);
     } break;
     case 2: {
         checkpoint();
